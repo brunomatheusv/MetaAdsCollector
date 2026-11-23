@@ -52,6 +52,7 @@ Desktop.ini
 
 # Output data
 *.json
+!radar/data/fernando-oliveira-pro-106.json
 !.github/**/*.json
 *.csv
 *.jsonl

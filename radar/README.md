@@ -12,13 +12,15 @@ validacao comercial.
 ## Uso
 
 ```bash
-meta-ads-radar --registry fernando-106.json --gate 10 --database radar.sqlite3 \
+meta-ads-radar --registry radar/data/fernando-oliveira-pro-106.json --gate 10 --database radar.sqlite3 \
   --limit 10 --max-age-days 60 \
   --json-output radar.json --markdown-output radar.md
 ```
 
-O registry deve ser um JSON com exatamente 106 strings, na ordem e grafia do
-material fornecido pelo usuario, todas com procedencia `Fernando Oliveira PRO`.
+O registry canonico transcreve exatamente 106 strings, na ordem e grafia do PDF
+oficial, com procedencia `Fernando Oliveira PRO` e as quatro categorias originais:
+39 Formatos e materiais, 26 Nichos e temas, 21 Oferta/acesso/beneficios e
+20 Plataformas/dominios.
 Sem essa fonte o loader falha em vez de inventar termos. A execucao usa os gates
 obrigatorios `10 -> 25 -> 50 -> 106`, em lotes configuraveis e com historico SQLite.
 

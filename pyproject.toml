@@ -77,8 +77,11 @@ Documentation = "https://promisingcoder.github.io/MetaAdsCollector/"
 Changelog = "https://github.com/promisingcoder/MetaAdsCollector/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
-packages = ["meta_ads_collector", "meta_ads_collector_mcp", "radar"]
+packages = ["meta_ads_collector", "meta_ads_collector_mcp", "radar", "radar.data"]
 package-dir = {meta_ads_collector_mcp = "mcp/src/meta_ads_collector_mcp"}
+
+[tool.setuptools.package-data]
+radar = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

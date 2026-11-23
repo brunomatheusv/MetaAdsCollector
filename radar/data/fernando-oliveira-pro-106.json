@@ -1,0 +1,45 @@
+{
+  "source": "Fernando Oliveira PRO",
+  "categories": [
+    {
+      "name": "Formatos e materiais",
+      "terms": [
+        "ebook", "apostila", "guia", "guia visual", "atlas", "atlas visual", "manual",
+        "mapa mental", "mapa visual", "mapas visuais", "fichas ilustradas", "flashcard",
+        "cartilha", "protocolos", "biblioteca", "checklist", "planilha", "planilha pronta",
+        "templates", "moldes", "pack", "kit", "kit de modelos", "kit coleção", "sistema",
+        "planner digital", "pdf", "material digital", "material em pdf", "atividades pdf",
+        "apostila pdf", "kit pdf", "pdf ilustrado", "ilustrado", "para imprimir",
+        "atividades para imprimir", "caderno de atividades", "mini curso", "áudio"
+      ]
+    },
+    {
+      "name": "Nichos e temas",
+      "terms": [
+        "dinâmicas", "dinâmicas ou brincadeiras", "atividade", "alfabetização", "leitura fácil",
+        "educação infantil", "estimulação cognitiva", "neuroestimulação", "autismo",
+        "concurso público", "recursos para psicólogo", "fisioterapia", "enfermagem", "estética",
+        "maternidade", "crochê", "costura", "receitas", "ebook receitas", "confeitaria",
+        "marcenaria", "igreja", "oração", "devocional", "finanças pessoais", "pets"
+      ]
+    },
+    {
+      "name": "Oferta, acesso e benefícios",
+      "terms": [
+        "acesso imediato", "entrega imediata", "receba no e-mail", "pague uma vez", "download",
+        "download imediato", "Baixe agora", "você recebe", "acesso vitalício", "imediato",
+        "somente hoje", "apenas 10", "apenas 17", "por apenas R$10", "PDF apenas R$10",
+        "pacote por apenas 9,99", "barato", "rápido", "simples", "em casa", "exclusivo"
+      ]
+    },
+    {
+      "name": "Plataformas e domínios",
+      "terms": [
+        "hotmart", "kiwify", "eduzz", "vercel", "lovable", "vercel.app", "netlify.app",
+        "lovable.app", "pagina.lowify.com.br", "paginas.lowify.com.br", "gamma.site", "replit.app",
+        "bolt.host", "framer.website", "webflow.io", "pages.dev", "wixsite.com", "carrd.co",
+        "notion.site", "botix.site"
+      ]
+    }
+  ]
+}

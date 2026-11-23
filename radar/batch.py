@@ -42,7 +42,7 @@ def run_batch(entries: list[KeywordEntry], store: RadarStore, config: RadarConfi
 
     def default_search(entry: KeywordEntry, cfg: RadarConfig) -> Iterable[Ad]:
         with MetaAdsCollector() as collector:
-            return list(collector.search(query=entry.text, country=cfg.country, status=cfg.status,
+            return list(collector.search(query=entry.text, country=cfg.country, status=cfg.status.upper(),
                                          max_results=cfg.max_results_per_keyword))
 
     search_fn = search or default_search
