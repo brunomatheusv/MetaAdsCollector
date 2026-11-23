@@ -67,6 +67,7 @@ dev = [
 [project.scripts]
 meta-ads-collector = "meta_ads_collector.cli:main"
 meta-ads-mcp = "meta_ads_collector_mcp.cli:main"
+meta-ads-radar = "radar.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/promisingcoder/MetaAdsCollector"
@@ -76,7 +77,7 @@ Documentation = "https://promisingcoder.github.io/MetaAdsCollector/"
 Changelog = "https://github.com/promisingcoder/MetaAdsCollector/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
-packages = ["meta_ads_collector", "meta_ads_collector_mcp"]
+packages = ["meta_ads_collector", "meta_ads_collector_mcp", "radar"]
 package-dir = {meta_ads_collector_mcp = "mcp/src/meta_ads_collector_mcp"}
 
 [tool.pytest.ini_options]

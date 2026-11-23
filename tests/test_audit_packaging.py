@@ -95,7 +95,7 @@ def _build_isolated_sdist(directory, root=None):
     ignored = shutil.ignore_patterns("__pycache__", "runtime", "test-results", ".private", "artifacts")
     for name in (
         "pyproject.toml", "MANIFEST.in", "README.md", "LICENSE", "CHANGELOG.md",
-        "meta_ads_collector", "mcp", "tests", "scripts", "docs", ".github",
+        "meta_ads_collector", "radar", "mcp", "tests", "scripts", "docs", ".github",
     ):
         original = root / name
         if original.is_dir():

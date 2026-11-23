@@ -3,6 +3,7 @@ include README.md
 include CHANGELOG.md
 include pyproject.toml
 include meta_ads_collector/py.typed
+include radar/README.md
 recursive-include docs *.md
 recursive-include tests *.py
 recursive-include scripts *.py
