@@ -14,13 +14,23 @@ class RadarConfig:
     max_results_per_keyword: int = 20
     max_age_days: int = 60
     min_related_ads: int = 5
+    batch_size: int = 5
+    interval_seconds: float = 1.0
+    backoff_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         if self.country.upper() != "BR":
             raise ValueError("Radar MVP supports only country=BR")
         if self.status.lower() != "active":
             raise ValueError("Radar MVP supports only status=active")
-        if self.max_results_per_keyword < 1 or self.max_age_days < 1 or self.min_related_ads < 1:
+        if (
+            self.max_results_per_keyword < 1
+            or self.max_age_days < 1
+            or self.min_related_ads < 1
+            or self.batch_size < 1
+            or self.interval_seconds < 0
+            or self.backoff_seconds < 0
+        ):
             raise ValueError("limits must be positive")
 
 
@@ -57,6 +67,8 @@ class EvidenceGroup:
     ad_ids: list[str]
     start_dates: list[str | None]
     ages_days: list[int | None]
+    first_start_date: str | None
+    last_start_date: str | None
     destination_urls: list[str]
     destination_domains: list[str]
     grouping_signals: list[str]
@@ -65,6 +77,7 @@ class EvidenceGroup:
     criterion_max_age: str
     final_status: str
     reasons: list[str]
+    review_status: str = "NOVO"
 
 
 @dataclass

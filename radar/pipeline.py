@@ -87,6 +87,7 @@ def _evaluate(items: list[NormalizedAd], config: RadarConfig) -> EvidenceGroup:
         status = "REJEITADO"
 
     raw_key = "|".join(_group_key(first))
+    known_dates = sorted(item.start_time for item in items if item.start_time is not None)
     return EvidenceGroup(
         group_id=hashlib.sha256(raw_key.encode()).hexdigest()[:12],
         keywords=sorted(set().union(*(item.keywords for item in items))),
@@ -100,6 +101,8 @@ def _evaluate(items: list[NormalizedAd], config: RadarConfig) -> EvidenceGroup:
         ad_ids=ad_ids,
         start_dates=[item.start_time.isoformat() if item.start_time else None for item in items],
         ages_days=[item.age_days for item in items],
+        first_start_date=known_dates[0].isoformat() if known_dates else None,
+        last_start_date=known_dates[-1].isoformat() if known_dates else None,
         destination_urls=sorted({item.destination_url for item in items if item.destination_url}),
         destination_domains=sorted({item.destination_domain for item in items if item.destination_domain}),
         grouping_signals=signals,
@@ -142,8 +145,8 @@ def analyze_ads(
 
 def collect_and_analyze(keywords: list[str], config: RadarConfig | None = None) -> RadarReport:
     config = config or RadarConfig()
-    if not 1 <= len(keywords) <= 5:
-        raise ValueError("Radar MVP accepts 1 to 5 keywords per run")
+    if not keywords:
+        raise ValueError("Radar requires at least one keyword")
     records: list[tuple[Ad, set[str]]] = []
     with MetaAdsCollector() as collector:
         for keyword in keywords:

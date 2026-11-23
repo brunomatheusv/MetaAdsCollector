@@ -1,4 +1,4 @@
-# Radar Low-Ticket — MVP Fase 1
+# Radar Low-Ticket — Fase 2
 
 O pacote `radar` e uma camada separada sobre o `MetaAdsCollector`. O core continua
 responsavel apenas por coletar e normalizar o payload da Meta. O Radar faz
@@ -12,13 +12,18 @@ validacao comercial.
 ## Uso
 
 ```bash
-meta-ads-radar "curso online" "emagrecimento" \
+meta-ads-radar --registry fernando-106.json --gate 10 --database radar.sqlite3 \
   --limit 10 --max-age-days 60 \
   --json-output radar.json --markdown-output radar.md
 ```
 
-O MVP aceita de 1 a 5 palavras-chave, usa exclusivamente `BR` e solicita apenas
-anuncios ativos. A coleta pode retornar vazia ou incompleta por mudancas nos
+O registry deve ser um JSON com exatamente 106 strings, na ordem e grafia do
+material fornecido pelo usuario, todas com procedencia `Fernando Oliveira PRO`.
+Sem essa fonte o loader falha em vez de inventar termos. A execucao usa os gates
+obrigatorios `10 -> 25 -> 50 -> 106`, em lotes configuraveis e com historico SQLite.
+
+O Radar usa exclusivamente `BR` e solicita apenas anuncios ativos. A coleta pode
+retornar vazia ou incompleta por mudancas nos
 endpoints internos, verificacao ou rate limits da Meta; vazio nao prova ausencia
 de anuncios.
 
@@ -36,6 +41,12 @@ de anuncios.
 - Criativos so sao contados como duplicados quando existe fingerprint de conteudo
   suficiente. Caso contrario a estimativa fica `null`.
 - Data ausente produz `INCERTO` e `EVIDENCIA_INSUFICIENTE`; nenhuma data e inventada.
+
+## Persistencia e revisao
+
+O SQLite preserva execucoes, resultados por keyword, origens anuncio/keyword,
+historico de contagem e os estados humanos `NOVO`, `REVISAR`, `APROVADO`,
+`DESCARTADO` e `ACOMPANHAR`. Uma nova coleta nunca aprova automaticamente um grupo.
 
 ## Permanecem manuais
 
