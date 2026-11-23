@@ -8,12 +8,12 @@ from pathlib import Path
 from .batch import run_batch
 from .models import RadarConfig
 from .registry import load_fernando_registry
-from .reporting import render_json, render_markdown
+from .reporting import render_events_json, render_json, render_markdown, render_queue_json, render_queue_markdown
 from .storage import RadarStore
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Radar Low-Ticket Fase 2")
+    parser = argparse.ArgumentParser(description="Radar Low-Ticket Fase 3 incremental")
     parser.add_argument("--registry", type=Path, required=True, help="JSON canonico com as 106 keywords Fernando")
     parser.add_argument("--gate", type=int, choices=[10, 25, 50, 106], required=True)
     parser.add_argument("--database", type=Path, default=Path("radar.sqlite3"))
@@ -27,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backoff", type=float, default=5.0)
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path)
+    parser.add_argument("--events-output", type=Path, help="exporta eventos incrementais JSON")
+    parser.add_argument("--queue-json-output", type=Path, help="exporta fila pendente JSON")
+    parser.add_argument("--queue-markdown-output", type=Path, help="exporta fila pendente Markdown")
+    parser.add_argument("--since-run-id", type=int, help="exporta eventos/fila posteriores a este run_id")
+    parser.add_argument("--ack-group", action="append", default=[], metavar="GROUP_ID",
+                        help="confirma itens deste grupo na execucao atual sem alterar review_status")
     return parser
 
 
@@ -37,10 +43,22 @@ def main() -> int:
         args.batch_size, args.interval, args.backoff,
     )
     entries = load_fernando_registry(args.registry)[:args.gate]
-    _, report, _ = run_batch(entries, RadarStore(args.database), config)
+    store = RadarStore(args.database)
+    run_id, report, _ = run_batch(entries, store, config)
     args.json_output.write_text(render_json(report) + "\n", encoding="utf-8")
     summary = render_markdown(report)
     if args.markdown_output:
         args.markdown_output.write_text(summary + "\n", encoding="utf-8")
+    for group_id in args.ack_group:
+        store.acknowledge(run_id, group_id)
+    events = store.events_since(args.since_run_id) if args.since_run_id is not None else store.events(run_id)
+    queue = store.review_queue_since(args.since_run_id) if args.since_run_id is not None else store.review_queue(run_id)
+    if args.events_output:
+        args.events_output.write_text(render_events_json(events) + "\n", encoding="utf-8")
+    if args.queue_json_output:
+        args.queue_json_output.write_text(render_queue_json(queue) + "\n", encoding="utf-8")
+    if args.queue_markdown_output:
+        args.queue_markdown_output.write_text(render_queue_markdown(queue) + "\n", encoding="utf-8")
     print(summary)
+    print("\n" + render_queue_markdown(queue))
     return 0

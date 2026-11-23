@@ -104,3 +104,34 @@ class RadarReport:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         return data
+
+
+@dataclass(frozen=True)
+class IncrementalEvent:
+    event_type: str
+    run_id: int
+    group_id: str
+    occurred_at: str
+    before: dict[str, Any] | None
+    after: dict[str, Any]
+    reasons: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReviewQueueItem:
+    run_id: int
+    group_id: str
+    queue_type: str
+    priority: int
+    created_at: str
+    review_status: str
+    reason: str
+    event_types: list[str]
+    group: dict[str, Any]
+    acknowledged_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

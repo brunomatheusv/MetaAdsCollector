@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .models import RadarReport
+from .models import IncrementalEvent, RadarReport, ReviewQueueItem
 
 
 def render_json(report: RadarReport) -> str:
@@ -12,7 +12,7 @@ def render_json(report: RadarReport) -> str:
 
 
 def render_markdown(report: RadarReport) -> str:
-    lines = ["# Relatorio Radar Low-Ticket — Fase 2", "", f"> {report.disclaimer}", ""]
+    lines = ["# Relatorio Radar Low-Ticket — Fase 3", "", f"> {report.disclaimer}", ""]
     lines += [
         f"- Observacoes coletadas: {report.collection['observations']}",
         f"- IDs de anuncio unicos: {report.collection['unique_ad_ids']}",
@@ -37,5 +37,42 @@ def render_markdown(report: RadarReport) -> str:
             f"- IDs para revisao: {', '.join(group.ad_ids)}",
             f"- Motivos: {'; '.join(group.reasons)}",
             "",
+        ]
+    return "\n".join(lines)
+
+
+def render_events_json(events: list[IncrementalEvent]) -> str:
+    return json.dumps([event.to_dict() for event in events], ensure_ascii=False, indent=2)
+
+
+def render_queue_json(items: list[ReviewQueueItem]) -> str:
+    return json.dumps([item.to_dict() for item in items], ensure_ascii=False, indent=2)
+
+
+def render_queue_markdown(items: list[ReviewQueueItem]) -> str:
+    lines = ["# Fila de revisao incremental — Fase 3", "",
+             "> Entrada no Radar indica somente filtros tecnicos; nao e validacao comercial.", ""]
+    if not items:
+        return "\n".join(lines + ["Nenhuma mudanca material pendente."])
+    for item in items:
+        group = item.group
+        previous = group.get("previous") or {}
+        old_count = previous.get("related_ads_count", "novo")
+        old_ids = set(previous.get("ad_ids", []))
+        new_ids = sorted(set(group.get("ad_ids", [])) - old_ids)
+        lines += [
+            f"## P{item.priority} · {item.queue_type} · {group.get('offer_name') or item.group_id}", "",
+            f"- Anunciante: {group.get('advertiser') or 'desconhecido'}",
+            f"- Contagem antes -> agora: {old_count} -> {group.get('related_ads_count')}",
+            f"- Novos IDs: {', '.join(new_ids) or 'nenhum'}",
+            f"- IDs atuais: {', '.join(group.get('ad_ids', [])) or 'ausentes'}",
+            f"- Datas: {group.get('first_start_date') or 'ausente'} -> {group.get('last_start_date') or 'ausente'}",
+            f"- Keywords: {', '.join(group.get('keywords', [])) or 'ausentes'}",
+            f"- URLs/dominios: {', '.join(group.get('destination_urls', [])) or 'ausentes'} / "
+            f"{', '.join(group.get('destination_domains', [])) or 'ausentes'}",
+            f"- Confianca/status tecnico/revisao: {group.get('grouping_confidence')} / "
+            f"{group.get('final_status')} / {item.review_status}",
+            f"- Eventos: {', '.join(item.event_types)}",
+            f"- Motivo: {item.reason}", "",
         ]
     return "\n".join(lines)

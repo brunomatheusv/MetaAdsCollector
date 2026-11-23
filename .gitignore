@@ -58,6 +58,7 @@ Desktop.ini
 *.jsonl
 output/
 ad_media/
+work/
 
 # SQLite state files
 *.db
