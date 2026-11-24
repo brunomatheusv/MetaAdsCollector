@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 
 FERNANDO_SOURCE = "Fernando Oliveira PRO"
@@ -34,7 +35,14 @@ def stable_keyword_id(text: str) -> str:
 
 def load_fernando_registry(path: str | Path) -> list[KeywordEntry]:
     """Load the canonical PDF transcription and reject any mutation of scope."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    registry_path = Path(path)
+    if registry_path.exists():
+        contents = registry_path.read_text(encoding="utf-8")
+    elif registry_path.name == "fernando-oliveira-pro-106.json":
+        contents = resources.files("radar.data").joinpath(registry_path.name).read_text(encoding="utf-8")
+    else:
+        raise FileNotFoundError(registry_path)
+    raw = json.loads(contents)
     if not isinstance(raw, dict) or raw.get("source") != FERNANDO_SOURCE:
         raise ValueError(f"Fernando registry source must be {FERNANDO_SOURCE!r}")
     categories = raw.get("categories")

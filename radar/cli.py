@@ -6,14 +6,26 @@ import argparse
 from pathlib import Path
 
 from .batch import run_batch
+from .cycle import get_cycle, run_cycle, start_cycle
 from .models import RadarConfig
 from .registry import load_fernando_registry
-from .reporting import render_events_json, render_json, render_markdown, render_queue_json, render_queue_markdown
+from .reporting import (
+    render_cycle_json,
+    render_cycle_markdown,
+    render_events_json,
+    render_json,
+    render_markdown,
+    render_queue_json,
+    render_queue_markdown,
+)
 from .storage import RadarStore
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Radar Low-Ticket Fase 3 incremental")
+    parser = argparse.ArgumentParser(description="Radar Low-Ticket Fase 4A recorrente")
+    parser.add_argument("--cycle-action", choices=["start", "run", "resume", "status", "report", "queue"],
+                        help="contrato manual de ciclo; ausente preserva a CLI da Fase 3")
+    parser.add_argument("--cycle-id", help="identificador retornado por --cycle-action start")
     parser.add_argument("--registry", type=Path, required=True, help="JSON canonico com as 106 keywords Fernando")
     parser.add_argument("--gate", type=int, choices=[10, 25, 50, 106], required=True)
     parser.add_argument("--database", type=Path, default=Path("radar.sqlite3"))
@@ -25,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=5)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--backoff", type=float, default=5.0)
-    parser.add_argument("--json-output", type=Path, required=True)
+    parser.add_argument("--json-output", type=Path)
     parser.add_argument("--markdown-output", type=Path)
     parser.add_argument("--events-output", type=Path, help="exporta eventos incrementais JSON")
     parser.add_argument("--queue-json-output", type=Path, help="exporta fila pendente JSON")
@@ -44,8 +56,39 @@ def main() -> int:
     )
     entries = load_fernando_registry(args.registry)[:args.gate]
     store = RadarStore(args.database)
+    if args.cycle_action:
+        if args.cycle_action == "start":
+            cycle = start_cycle(entries, store, config)
+            print(render_cycle_markdown(cycle))
+            return 0
+        if not args.cycle_id:
+            raise SystemExit("--cycle-id is required for this cycle action")
+        if args.cycle_action in {"run", "resume"}:
+            cycle, report = run_cycle(store, args.cycle_id, entries, config)
+            run_id = cycle.run_ids[-1]
+            for group_id in args.ack_group:
+                store.acknowledge(run_id, group_id)
+            events, queue = store.events(run_id), store.review_queue(run_id)
+            summary = render_cycle_markdown(cycle, report, events, queue)
+            if args.json_output:
+                args.json_output.write_text(render_cycle_json(cycle, report, events, queue) + "\n", encoding="utf-8")
+            if args.markdown_output:
+                args.markdown_output.write_text(summary + "\n", encoding="utf-8")
+            print(summary)
+            return 0
+        cycle = get_cycle(store, args.cycle_id)
+        if args.cycle_action in {"status", "report"}:
+            print(render_cycle_markdown(cycle))
+        else:
+            if args.ack_group and cycle.run_ids:
+                for group_id in args.ack_group:
+                    store.acknowledge(cycle.run_ids[-1], group_id)
+            print(render_queue_markdown(store.review_queue()))
+        return 0
+
     run_id, report, _ = run_batch(entries, store, config)
-    args.json_output.write_text(render_json(report) + "\n", encoding="utf-8")
+    if args.json_output:
+        args.json_output.write_text(render_json(report) + "\n", encoding="utf-8")
     summary = render_markdown(report)
     if args.markdown_output:
         args.markdown_output.write_text(summary + "\n", encoding="utf-8")

@@ -78,6 +78,9 @@ class EvidenceGroup:
     final_status: str
     reasons: list[str]
     review_status: str = "NOVO"
+    coverage_context: dict[str, Any] | None = None
+    freshness_status: str = "ACTIVE_OBSERVED"
+    consecutive_full_absences: int = 0
 
 
 @dataclass
@@ -132,6 +135,50 @@ class ReviewQueueItem:
     event_types: list[str]
     group: dict[str, Any]
     acknowledged_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CycleCoverage:
+    kind: str
+    expected: int
+    succeeded: int
+    failed: int
+    empty: int
+    pending: int
+    ratio: float
+    depth_limit_per_keyword: int
+    official_plan: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CollectionCycle:
+    cycle_id: str
+    started_at: str
+    finished_at: str | None
+    status: str
+    registry_source: str
+    registry_version: str
+    registry_hash: str
+    plan_hash: str
+    config: dict[str, Any]
+    total_keywords_expected: int
+    attempted: int
+    succeeded: int
+    failed: int
+    empty: int
+    pending: int
+    coverage_ratio: float
+    coverage_kind: str
+    official_plan: bool
+    run_ids: list[int]
+    reason: str | None = None
+    duration_seconds: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

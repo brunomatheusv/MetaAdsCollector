@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import IncrementalEvent, RadarReport, ReviewQueueItem
+from .models import CollectionCycle, IncrementalEvent, RadarReport, ReviewQueueItem
 
 REVIEW_STATUSES = {"NOVO", "REVISAR", "APROVADO", "DESCARTADO", "ACOMPANHAR"}
 
@@ -72,7 +72,85 @@ class RadarStore:
                     PRIMARY KEY(run_id, group_id),
                     FOREIGN KEY(run_id) REFERENCES runs(id), FOREIGN KEY(group_id) REFERENCES groups(group_id)
                 );
+                CREATE TABLE IF NOT EXISTS collection_cycles (
+                    cycle_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
+                    status TEXT NOT NULL, registry_source TEXT NOT NULL, registry_version TEXT NOT NULL,
+                    registry_hash TEXT NOT NULL, plan_hash TEXT NOT NULL, config_json TEXT NOT NULL,
+                    total_keywords_expected INTEGER NOT NULL, official_plan INTEGER NOT NULL,
+                    reason TEXT
+                );
+                CREATE TABLE IF NOT EXISTS cycle_keywords (
+                    cycle_id TEXT NOT NULL, ordinal INTEGER NOT NULL, keyword_id TEXT NOT NULL,
+                    keyword_text TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
+                    raw_count INTEGER NOT NULL DEFAULT 0, error TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+                    payload BLOB, updated_at TEXT,
+                    PRIMARY KEY(cycle_id, keyword_id),
+                    FOREIGN KEY(cycle_id) REFERENCES collection_cycles(cycle_id)
+                );
+                CREATE TABLE IF NOT EXISTS cycle_runs (
+                    cycle_id TEXT NOT NULL, run_id INTEGER NOT NULL,
+                    PRIMARY KEY(cycle_id,run_id), FOREIGN KEY(cycle_id) REFERENCES collection_cycles(cycle_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(id)
+                );
+                CREATE TABLE IF NOT EXISTS group_freshness (
+                    group_id TEXT PRIMARY KEY, last_seen_cycle TEXT, last_seen_at TEXT,
+                    consecutive_full_absences INTEGER NOT NULL DEFAULT 0,
+                    freshness_status TEXT NOT NULL DEFAULT 'ACTIVE_OBSERVED',
+                    FOREIGN KEY(group_id) REFERENCES groups(group_id)
+                );
             """)
+
+    def create_cycle(self, cycle: CollectionCycle, keywords: list[tuple[str, str, str]]) -> None:
+        with self.connect() as db:
+            db.execute("""INSERT INTO collection_cycles
+                (cycle_id,started_at,finished_at,status,registry_source,registry_version,registry_hash,
+                 plan_hash,config_json,total_keywords_expected,official_plan,reason)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                cycle.cycle_id, cycle.started_at, cycle.finished_at, cycle.status, cycle.registry_source,
+                cycle.registry_version, cycle.registry_hash, cycle.plan_hash,
+                json.dumps(cycle.config, ensure_ascii=False, sort_keys=True), cycle.total_keywords_expected,
+                int(cycle.official_plan), cycle.reason,
+            ))
+            db.executemany("""INSERT INTO cycle_keywords
+                (cycle_id,ordinal,keyword_id,keyword_text,source) VALUES(?,?,?,?,?)""",
+                [(cycle.cycle_id, i, keyword_id, text, source)
+                 for i, (keyword_id, text, source) in enumerate(keywords)])
+
+    def cycle_row(self, cycle_id: str) -> sqlite3.Row:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM collection_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
+        if row is None:
+            raise KeyError(cycle_id)
+        return row
+
+    def cycle_keywords(self, cycle_id: str) -> list[sqlite3.Row]:
+        with self.connect() as db:
+            return db.execute(
+                "SELECT * FROM cycle_keywords WHERE cycle_id=? ORDER BY ordinal", (cycle_id,)
+            ).fetchall()
+
+    def attach_cycle_run(self, cycle_id: str, run_id: int) -> None:
+        with self.connect() as db:
+            db.execute("INSERT OR IGNORE INTO cycle_runs VALUES(?,?)", (cycle_id, run_id))
+
+    def record_cycle_keyword(self, cycle_id: str, keyword_id: str, status: str, raw_count: int = 0,
+                             error: str | None = None, payload: bytes | None = None) -> None:
+        with self.connect() as db:
+            db.execute("""UPDATE cycle_keywords SET status=?,raw_count=?,error=?,payload=?,
+                attempts=attempts+1,updated_at=? WHERE cycle_id=? AND keyword_id=?""", (
+                status, raw_count, error, payload, datetime.now(timezone.utc).isoformat(), cycle_id, keyword_id,
+            ))
+
+    def update_cycle(self, cycle_id: str, status: str, *, finished: bool, reason: str | None = None) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE collection_cycles SET status=?,finished_at=?,reason=? WHERE cycle_id=?", (
+                status, datetime.now(timezone.utc).isoformat() if finished else None, reason, cycle_id,
+            ))
+
+    def cycle_run_ids(self, cycle_id: str) -> list[int]:
+        with self.connect() as db:
+            rows = db.execute("SELECT run_id FROM cycle_runs WHERE cycle_id=? ORDER BY run_id", (cycle_id,)).fetchall()
+        return [int(row[0]) for row in rows]
 
     def start_run(self, config: dict) -> int:
         now = datetime.now(timezone.utc).isoformat()
@@ -161,6 +239,86 @@ class RadarStore:
                           item.reason, json.dumps(item.event_types),
                           json.dumps(item.group, ensure_ascii=False, sort_keys=True)))
         return events
+
+    def latest_group_evidence(self, group_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT evidence_json FROM group_history WHERE group_id=? ORDER BY run_id DESC LIMIT 1",
+                (group_id,),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def known_group_ids(self) -> set[str]:
+        with self.connect() as db:
+            rows = db.execute("SELECT group_id FROM groups").fetchall()
+        return {str(row[0]) for row in rows}
+
+    def reconcile_cycle(
+        self, cycle_id: str, run_id: int, observed_group_ids: set[str], *, full: bool
+    ) -> list[IncrementalEvent]:
+        """Update freshness. Absence is actionable only after two consecutive FULL cycles."""
+        now = datetime.now(timezone.utc).isoformat()
+        emitted: list[IncrementalEvent] = []
+        with self.connect() as db:
+            known = {str(row[0]) for row in db.execute("SELECT group_id FROM groups").fetchall()}
+            for group_id in observed_group_ids:
+                db.execute("""INSERT INTO group_freshness
+                    (group_id,last_seen_cycle,last_seen_at,consecutive_full_absences,freshness_status)
+                    VALUES(?,?,?,0,'ACTIVE_OBSERVED') ON CONFLICT(group_id) DO UPDATE SET
+                    last_seen_cycle=excluded.last_seen_cycle,last_seen_at=excluded.last_seen_at,
+                    consecutive_full_absences=0,freshness_status='ACTIVE_OBSERVED'""", (group_id, cycle_id, now))
+            if not full:
+                return emitted
+            for group_id in known - observed_group_ids:
+                row = db.execute(
+                    "SELECT consecutive_full_absences FROM group_freshness WHERE group_id=?", (group_id,)
+                ).fetchone()
+                count = (int(row[0]) if row else 0) + 1
+                freshness = "POSSIBLY_GONE" if count >= 2 else "STALE"
+                db.execute("""INSERT INTO group_freshness
+                    (group_id,consecutive_full_absences,freshness_status) VALUES(?,?,?)
+                    ON CONFLICT(group_id) DO UPDATE SET consecutive_full_absences=?,freshness_status=?""",
+                    (group_id, count, freshness, count, freshness))
+                if count != 2:
+                    continue
+                before_row = db.execute("""SELECT evidence_json FROM group_history
+                    WHERE group_id=? ORDER BY run_id DESC LIMIT 1""", (group_id,)).fetchone()
+                before = json.loads(before_row[0]) if before_row else {}
+                if before.get("final_status") != "CANDIDATO_RADAR":
+                    continue
+                after = dict(before)
+                after.update({
+                    "freshness_status": freshness,
+                    "consecutive_full_absences": count,
+                    "coverage_context": {"kind": "FULL_COVERAGE", "cycle_id": cycle_id},
+                })
+                event = IncrementalEvent(
+                    "LEFT_RADAR", run_id, group_id, now, before, after,
+                    ["ausente em 2 ciclos FULL consecutivos; sinal conservador, nao prova que a oferta morreu"],
+                )
+                db.execute("""INSERT OR IGNORE INTO incremental_events
+                    (run_id,group_id,event_type,occurred_at,before_json,after_json,reasons_json)
+                    VALUES(?,?,?,?,?,?,?)""", (
+                    run_id, group_id, event.event_type, now,
+                    json.dumps(before, ensure_ascii=False, sort_keys=True),
+                    json.dumps(after, ensure_ascii=False, sort_keys=True), json.dumps(event.reasons),
+                ))
+                snapshot = dict(after)
+                snapshot["previous"] = before
+                db.execute("""INSERT OR IGNORE INTO review_queue
+                    (run_id,group_id,queue_type,priority,created_at,reason,event_types_json,group_json)
+                    VALUES(?,?, 'SAIU_DO_RADAR',50,?,?,?,?)""", (
+                    run_id, group_id, now,
+                    "duas ausencias FULL; requer confirmacao humana e nao afirma morte da oferta",
+                    json.dumps(["LEFT_RADAR"]), json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                ))
+                emitted.append(event)
+        return emitted
+
+    def freshness(self, group_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM group_freshness WHERE group_id=?", (group_id,)).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _derive_events(run_id: int, now: str, group_id: str, before: dict | None,

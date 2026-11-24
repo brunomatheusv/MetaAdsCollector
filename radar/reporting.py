@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .models import IncrementalEvent, RadarReport, ReviewQueueItem
+from .models import CollectionCycle, IncrementalEvent, RadarReport, ReviewQueueItem
 
 
 def render_json(report: RadarReport) -> str:
@@ -75,4 +75,57 @@ def render_queue_markdown(items: list[ReviewQueueItem]) -> str:
             f"- Eventos: {', '.join(item.event_types)}",
             f"- Motivo: {item.reason}", "",
         ]
+    return "\n".join(lines)
+
+
+def render_cycle_json(cycle: CollectionCycle, report: RadarReport | None = None,
+                      events: list[IncrementalEvent] | None = None,
+                      queue: list[ReviewQueueItem] | None = None) -> str:
+    payload = cycle.to_dict()
+    payload["plan_scope_warning"] = (
+        f"{cycle.coverage_kind} descreve a cobertura do plano; o limite por keyword nao cobre toda a Meta Ads Library."
+    )
+    if report is not None:
+        payload["collection"] = report.collection
+    if events is not None:
+        counts: dict[str, int] = {}
+        for event in events:
+            counts[event.event_type] = counts.get(event.event_type, 0) + 1
+        payload["events_by_type"] = counts
+    if queue is not None:
+        payload["queue_pending"] = len(queue)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def render_cycle_markdown(cycle: CollectionCycle, report: RadarReport | None = None,
+                          events: list[IncrementalEvent] | None = None,
+                          queue: list[ReviewQueueItem] | None = None) -> str:
+    lines = [
+        f"# Ciclo {cycle.cycle_id}", "",
+        f"- Status: {cycle.status}",
+        f"- Cobertura: {cycle.coverage_kind}",
+        f"- Esperadas / sucesso / falha / vazias / pendentes: {cycle.total_keywords_expected} / "
+        f"{cycle.succeeded} / {cycle.failed} / {cycle.empty} / {cycle.pending}",
+        f"- Ratio: {cycle.coverage_ratio:.2%}",
+        f"- Limit por keyword: {cycle.config['max_results_per_keyword']}",
+        f"- Inicio / fim: {cycle.started_at} / {cycle.finished_at or 'em andamento'}",
+        f"- Duracao: {cycle.duration_seconds if cycle.duration_seconds is not None else 'em andamento'} s",
+        f"- Runs tecnicos: {', '.join(map(str, cycle.run_ids)) or 'nenhum'}", "",
+        "> FULL significa todas as keywords do plano oficial processadas com sucesso; "
+        "nao significa cobertura total da Meta Ads Library.", "",
+    ]
+    if report is not None:
+        lines += [
+            f"- Observacoes brutas: {report.collection.get('observations', 0)}",
+            f"- Ads unicos: {report.collection.get('unique_ad_ids', 0)}",
+            f"- Grupos: {report.collection.get('groups', 0)}",
+            f"- Saidas suprimidas por cobertura: {report.collection.get('suppressed_absence_events', 0)}", "",
+        ]
+    if events is not None:
+        counts: dict[str, int] = {}
+        for event in events:
+            counts[event.event_type] = counts.get(event.event_type, 0) + 1
+        lines.append("- Eventos: " + (", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "nenhum"))
+    if queue is not None:
+        lines.append(f"- Fila pendente: {len(queue)}")
     return "\n".join(lines)

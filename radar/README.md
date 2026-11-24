@@ -1,4 +1,4 @@
-# Radar Low-Ticket — Fase 3
+# Radar Low-Ticket — Fase 4A
 
 O pacote `radar` e uma camada separada sobre o `MetaAdsCollector`. O core continua
 responsavel apenas por coletar e normalizar o payload da Meta. O Radar faz
@@ -79,3 +79,43 @@ o mesmo grupo e observado com todos os IDs anteriores ainda presentes e muda de
 A revisao de grupos ambiguos, a confirmacao de URLs/redirecionamentos, a avaliacao
 comercial da oferta e qualquer decisao de produto, pagina ou criativo continuam
 fora deste MVP.
+
+## Ciclos recorrentes manuais
+
+A Fase 4A separa o ciclo operacional dos `runs` tecnicos. Um ciclo guarda o plano,
+hash do registry, configuracao, progresso por keyword e todos os `run_id` usados.
+O resume aceita somente o mesmo registry/plano/configuracao, repete apenas falhas e
+pendencias e nunca repete uma keyword concluida, inclusive quando o resultado foi
+vazio.
+
+```bash
+# planejar um ciclo oficial (anote o cycle_id exibido)
+meta-ads-radar --cycle-action start --registry radar/data/fernando-oliveira-pro-106.json \
+  --gate 106 --database radar.sqlite3
+
+# executar ou retomar manualmente
+meta-ads-radar --cycle-action resume --cycle-id CYCLE_ID \
+  --registry radar/data/fernando-oliveira-pro-106.json --gate 106 \
+  --database radar.sqlite3 --json-output ciclo.json --markdown-output ciclo.md
+
+# consultar sem scheduler, daemon ou notificacao externa
+meta-ads-radar --cycle-action status --cycle-id CYCLE_ID \
+  --registry radar/data/fernando-oliveira-pro-106.json --gate 106 --database radar.sqlite3
+meta-ads-radar --cycle-action queue --cycle-id CYCLE_ID \
+  --registry radar/data/fernando-oliveira-pro-106.json --gate 106 --database radar.sqlite3
+```
+
+`FULL_COVERAGE` exige sucesso nas 106 keywords do registry oficial; resultado vazio
+conta como processado e erro nao. Gate/subset e sempre `PARTIAL_COVERAGE` em relacao
+ao plano oficial. O limite (padrao `20`) limita a profundidade de cada keyword:
+FULL do plano nunca significa cobertura total da Meta Ads Library.
+
+Ausencia em ciclo parcial nao reduz a evidencia conhecida nem gera `LEFT_RADAR`.
+Em ciclo completo, a primeira ausencia muda o frescor para `STALE`; somente a
+segunda ausencia em ciclos FULL consecutivos muda para `POSSIBLY_GONE` e pode gerar
+`LEFT_RADAR` para um grupo que era candidato. Mesmo assim, o evento e uma solicitacao
+conservadora de revisao humana, nunca uma afirmacao de que a oferta morreu.
+
+O ciclo continua manual: iniciar, executar/retomar, revisar a fila, reconhecer itens
+e iniciar o proximo ciclo. Scheduler, cron, daemon, crawling avancado, IA semantica,
+scoring comercial e notificacoes permanecem fora da Fase 4A.
