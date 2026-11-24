@@ -119,3 +119,53 @@ conservadora de revisao humana, nunca uma afirmacao de que a oferta morreu.
 O ciclo continua manual: iniciar, executar/retomar, revisar a fila, reconhecer itens
 e iniciar o proximo ciclo. Scheduler, cron, daemon, crawling avancado, IA semantica,
 scoring comercial e notificacoes permanecem fora da Fase 4A.
+
+## Fase 4B - identidade de oferta e revisao
+
+Na V1, a chave era a pagina mais o primeiro destino, ou o texto normalizado
+quando faltava destino. A raiz e links de plataformas podiam dar confianca
+alta. A normalizacao descartava `src` e `ref`, inclusive quando distinguiam
+ofertas. O fallback por texto podia promover copy repetida ao atingir cinco
+IDs. A V1 isolava cards com destinos distintos, mas so mostrava o primeiro
+destino e perdia um destino especifico quando apenas o primeiro card nao
+possuia URL. Adicionar keywords a um ID repetido ja era suportado, mas
+divergencias de destino entre essas observacoes eram descartadas.
+
+A V2 usa as seguintes regras, sem consultas a landing pages:
+
+- **ALTA / STRONG_SAME_OFFER** exige o mesmo page_id e o mesmo fingerprint
+  de destino especifico, sem conflito conhecido. Variacoes de criativo podem
+  integrar o mesmo grupo. Destinos especificos distintos permanecem separados,
+  inclusive quando dividem anunciante, copy ou collation_id.
+- **MEDIA / PROBABLE_SAME_OFFER** usa coincidencia exata de texto e fingerprint
+  de criativo dentro da mesma pagina e da mesma chave de destino fraco ou
+  ausente. O resultado segue para revisao humana.
+- **BAIXA / AMBIGUOUS** cobre identidade isolada, cards heterogeneos, URLs
+  invalidas e divergencias de destino para o mesmo ID. Um collation_id
+  compartilhado entre destinos especificos distintos reduz a confianca dos
+  respectivos grupos e nao serve para fundi-los.
+- O fingerprint ignora HTTP/HTTPS e o prefixo www, normaliza o host e remove
+  um slash final simples. Preserva caso do path, portas nao padrao, valores
+  vazios e a ordem dos valores de parametros repetidos. Remove utm_* e
+  identificadores conhecidos de clique, preservando parametros como ref, src
+  e sku. Raizes, rotas genericas, plataformas e encurtadores reconhecidos nao
+  sao destino especifico. A classificacao usa somente a URL observada.
+- Apenas confianca alta pode passar para CANDIDATO_RADAR, com IDs distintos,
+  atividade confirmada e dentro da janela do Radar. Em cobertura parcial, a
+  ficha distingue IDs atuais dos IDs de um grupo V2 anteriormente observado.
+  Ausencia parcial continua sem gerar LEFT_RADAR.
+
+Os IDs V2 sao hashes de chaves versionadas. A tabela aditiva
+`grouping_aliases` vincula identidades quando a pagina, o destino e todos os IDs
+historicos V1 coincidem com um unico grupo V2 de alta confianca. A revisao e
+a primeira observacao sao preservadas, e o historico pode ser consultado
+pelo ID V2. Acknowledgements ficam no item original, com seu run e seu ID.
+Sobreposicoes parciais, fusoes e splits entram para conciliacao humana.
+Grupos legados sem correspondencia ficam no historico e nao geram saida
+por ausencia em um ciclo V2.
+
+O relatorio e a fila incluem as razoes de identidade, conflitos, sinais de
+ruido, destinos de todos os cards e contexto de cobertura quando disponivel.
+CANDIDATO_RADAR indica que o grupo passou filtros tecnicos. A verificacao
+da oferta, do destino real de redirecionamentos e a decisao comercial
+continuam manuais.

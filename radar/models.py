@@ -51,6 +51,9 @@ class NormalizedAd:
     text_key: str | None
     creative_fingerprint: str | None
     stable_ids: dict[str, str]
+    destinations: tuple[tuple[str, str, str], ...] = ()
+    destination_kind: str = "MISSING"
+    conflicting_evidence: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -81,6 +84,17 @@ class EvidenceGroup:
     coverage_context: dict[str, Any] | None = None
     freshness_status: str = "ACTIVE_OBSERVED"
     consecutive_full_absences: int = 0
+    grouping_version: int = 2
+    evidence_level: str = "AMBIGUOUS"
+    separation_level: str | None = None
+    confidence_reasons: list[str] = field(default_factory=list)
+    conflicting_evidence: list[str] = field(default_factory=list)
+    noise_flags: list[str] = field(default_factory=list)
+    destination_fingerprints: list[str] = field(default_factory=list)
+    first_observed_at: str | None = None
+    last_observed_at: str | None = None
+    legacy_group_ids: list[str] = field(default_factory=list)
+    grouping_migration: str | None = None
 
 
 @dataclass

@@ -12,7 +12,25 @@ from meta_ads_collector import Ad
 
 from .models import NormalizedAd
 
-_TRACKING = {"fbclid", "gclid", "src", "ref"}
+_TRACKING = {"fbclid", "gclid", "dclid", "msclkid", "gbraid", "wbraid", "ttclid"}
+_GENERIC_HOSTS = {
+    "facebook.com", "instagram.com", "whatsapp.com", "wa.me", "messenger.com",
+    "bit.ly", "tinyurl.com", "t.co", "linktr.ee", "beacons.ai", "bio.link", "cutt.ly", "shorturl.at",
+}
+_GENERIC_PATHS = {"/", "/home", "/shop", "/store", "/catalog", "/catalogo", "/products", "/collections",
+                  "/loja", "/checkout", "/cart", "/login", "/search", "/contact", "/contato", "/redirect", "/go", "/r"}
+
+
+def destination_kind(domain: str | None, key: str | None) -> str:
+    if domain is None or key is None:
+        return "MISSING"
+    if any(domain == host or domain.endswith("." + host) for host in _GENERIC_HOSTS):
+        return "PLATFORM_OR_REDIRECT"
+    path = "/" + key.split("/", 1)[1].split("?", 1)[0].lower()
+    if path.startswith(("/redirect/", "/go/", "/r/")):
+        return "PLATFORM_OR_REDIRECT"
+    return "GENERIC_PATH" if path in _GENERIC_PATHS else "SPECIFIC_PATH"
+
 
 
 def _text(value: str | None) -> str | None:
@@ -27,18 +45,24 @@ def canonical_url(value: str | None) -> tuple[str | None, str | None, str | None
         return None, None, None
     try:
         parts = urlsplit(value.strip())
-        if parts.scheme not in {"http", "https"} or not parts.hostname:
+        if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username is not None:
             return value, None, None
         domain = parts.hostname.lower().removeprefix("www.")
+        netloc = f"[{domain}]" if ":" in domain else domain
+        port = parts.port
+        if port is not None and (parts.scheme, port) not in {("http", 80), ("https", 443)}:
+            netloc = f"{netloc}:{port}"
         commercial_params = (
             (key, value)
-            for key, value in parse_qsl(parts.query)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
             if key.lower() not in _TRACKING and not key.lower().startswith("utm_")
         )
-        query = urlencode(sorted(commercial_params))
-        path = re.sub(r"/+", "/", parts.path).rstrip("/") or "/"
-        canonical = urlunsplit((parts.scheme.lower(), domain, path, query, ""))
-        return canonical, domain, f"{domain}{path}?{query}".rstrip("?")
+        # Preserve the order of repeated values, which can affect server routing.
+        query = urlencode(sorted(commercial_params, key=lambda item: item[0]))
+        path = parts.path.removesuffix("/") if not parts.path.endswith("//") else parts.path
+        path = path or "/"
+        canonical = urlunsplit((parts.scheme, netloc, path, query, ""))
+        return canonical, domain, urlunsplit(("", netloc, path, query, "")).removeprefix("//")
     except (TypeError, ValueError):
         return value, None, None
 
@@ -61,9 +85,14 @@ def normalize_ad(ad: Ad, keywords: set[str], now: datetime) -> NormalizedAd:
     age = (now - start).days if start else None
     primary = ad.creatives[0] if ad.creatives else None
     destinations = [canonical_url(creative.link_url) for creative in ad.creatives if creative.link_url]
-    distinct_destination_keys = {item[2] for item in destinations if item[2]}
-    offer_ambiguous = len(distinct_destination_keys) > 1
-    url, domain, destination_key = canonical_url(primary.link_url if primary else None)
+    valid_destinations = sorted({(url, domain, key) for url, domain, key in destinations if url and domain and key})
+    keys = {key for _, _, key in valid_destinations}
+    conflicts = set()
+    if len(keys) > 1:
+        conflicts.add("multiplos_destinos_no_mesmo_anuncio")
+    if destinations and any(key is None for _, _, key in destinations):
+        conflicts.add("destino_invalido_ou_nao_interpretavel")
+    url, domain, destination_key = valid_destinations[0] if valid_destinations else (None, None, None)
     offer_name = (primary.title or primary.caption) if primary else None
     combined_text = " ".join(
         value
@@ -94,9 +123,12 @@ def normalize_ad(ad: Ad, keywords: set[str], now: datetime) -> NormalizedAd:
         destination_url=url,
         destination_domain=domain,
         destination_key=destination_key,
-        offer_ambiguous=offer_ambiguous,
+        offer_ambiguous=bool(conflicts),
         offer_name=offer_name,
         text_key=_text(combined_text),
         creative_fingerprint=fingerprint,
         stable_ids=stable_ids,
+        destinations=tuple(valid_destinations),
+        destination_kind=destination_kind(domain, destination_key),
+        conflicting_evidence=conflicts,
     )

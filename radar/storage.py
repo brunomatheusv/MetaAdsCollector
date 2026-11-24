@@ -9,7 +9,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import CollectionCycle, IncrementalEvent, RadarReport, ReviewQueueItem
+from .models import CollectionCycle, EvidenceGroup, IncrementalEvent, RadarReport, ReviewQueueItem
+from .normalize import canonical_url
 
 REVIEW_STATUSES = {"NOVO", "REVISAR", "APROVADO", "DESCARTADO", "ACOMPANHAR"}
 
@@ -57,6 +58,10 @@ class RadarStore:
                     related_ads_count INTEGER NOT NULL, final_status TEXT NOT NULL,
                     evidence_json TEXT NOT NULL, PRIMARY KEY(run_id, group_id),
                     FOREIGN KEY(run_id) REFERENCES runs(id), FOREIGN KEY(group_id) REFERENCES groups(group_id)
+                );
+                CREATE TABLE IF NOT EXISTS grouping_aliases (
+                    legacy_group_id TEXT PRIMARY KEY REFERENCES groups(group_id),
+                    group_id TEXT NOT NULL UNIQUE REFERENCES groups(group_id)
                 );
                 CREATE TABLE IF NOT EXISTS incremental_events (
                     run_id INTEGER NOT NULL, group_id TEXT NOT NULL, event_type TEXT NOT NULL,
@@ -191,26 +196,97 @@ class RadarStore:
                 (run_id, ad_id, keyword_id, datetime.now(timezone.utc).isoformat()),
             )
 
+    @staticmethod
+    def _grouping_migrations(db: sqlite3.Connection, report: RadarReport) -> dict[str, str]:
+        # Index legacy history by ad ID. Historical membership prevents silent
+        # transfer when only one branch of an old split is visible in this run.
+        legacy_members: dict[str, set[str]] = {}
+        legacy_pages: dict[str, set[str | None]] = {}
+        legacy_destinations: dict[str, set[str | None]] = {}
+        by_ad: dict[str, set[str]] = {}
+        for row in db.execute("""
+            SELECT h.group_id, h.evidence_json FROM group_history h
+            WHERE NOT EXISTS (SELECT 1 FROM grouping_aliases a WHERE a.legacy_group_id=h.group_id)
+              AND json_extract(h.evidence_json, '$.grouping_version') IS NULL
+        """):
+            evidence = json.loads(row["evidence_json"])
+            legacy_id = row["group_id"]
+            legacy_pages.setdefault(legacy_id, set()).add(evidence.get("page_id"))
+            destinations = {canonical_url(url)[2] for url in evidence.get("destination_urls", [])}
+            legacy_destinations.setdefault(legacy_id, set()).update(destinations or {None})
+            for ad_id in evidence.get("ad_ids", []):
+                legacy_members.setdefault(legacy_id, set()).add(ad_id)
+                by_ad.setdefault(ad_id, set()).add(legacy_id)
+        migrations = {}
+        for group in report.groups:
+            aliases = db.execute(
+                "SELECT legacy_group_id FROM grouping_aliases WHERE group_id=?", (group.group_id,)
+            ).fetchall()
+            ids = set(group.ad_ids)
+            overlap = set().union(*(by_ad.get(ad_id, set()) for ad_id in ids))
+            group.legacy_group_ids = sorted(overlap | {row[0] for row in aliases})
+            if aliases:
+                group.grouping_migration = "MATCHED" if not overlap else "AMBIGUOUS"
+            elif overlap:
+                group.grouping_migration = "AMBIGUOUS"
+                if len(overlap) == 1 and group.evidence_level == "STRONG_SAME_OFFER":
+                    reviewed = db.execute(
+                        "SELECT review_status FROM groups WHERE group_id=? AND review_status<>'NOVO'",
+                        (group.group_id,),
+                    ).fetchone()
+                    old_id = next(iter(overlap))
+                    if (
+                        not reviewed and ids == legacy_members[old_id] and {group.page_id} == legacy_pages[old_id]
+                        and set(group.destination_fingerprints) == legacy_destinations[old_id]
+                    ):
+                        group.grouping_migration = "MATCHED"
+                        migrations[group.group_id] = old_id
+            if group.grouping_migration == "AMBIGUOUS":
+                group.noise_flags.append("historico_v1_sem_correspondencia_inequivoca")
+                group.reasons.append("historico V1 exige conciliacao humana")
+        return migrations
+
+    @staticmethod
+    def _observe_group(
+        db: sqlite3.Connection, group: EvidenceGroup, now: str, legacy_id: str | None
+    ) -> None:
+        if legacy_id:
+            db.execute("""
+                INSERT OR IGNORE INTO groups(group_id,review_status,first_seen,last_seen)
+                SELECT ?,review_status,first_seen,? FROM groups WHERE group_id=?
+            """, (group.group_id, now, legacy_id))
+            db.execute("""
+                UPDATE groups SET (review_status,first_seen) =
+                    (SELECT review_status,first_seen FROM groups WHERE group_id=?)
+                WHERE group_id=? AND review_status='NOVO'
+            """, (legacy_id, group.group_id))
+            db.execute("INSERT INTO grouping_aliases VALUES(?,?)", (legacy_id, group.group_id))
+        db.execute("""
+            INSERT INTO groups(group_id,review_status,first_seen,last_seen) VALUES(?, 'NOVO', ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET last_seen=excluded.last_seen
+        """, (group.group_id, now, now))
+        row = db.execute(
+            "SELECT review_status,first_seen,last_seen FROM groups WHERE group_id=?", (group.group_id,)
+        ).fetchone()
+        group.review_status = row["review_status"]
+        group.first_observed_at = row["first_seen"]
+        group.last_observed_at = row["last_seen"]
+
     def persist_report(self, run_id: int, report: RadarReport) -> list[IncrementalEvent]:
         now = datetime.now(timezone.utc).isoformat()
         events: list[IncrementalEvent] = []
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            migrations = self._grouping_migrations(db, report)
             for group in report.groups:
-                current = dict(group.__dict__)
+                legacy_id = migrations.get(group.group_id)
                 previous_row = db.execute("""
                     SELECT gh.evidence_json FROM group_history gh
-                    WHERE gh.group_id=? AND gh.run_id < ? ORDER BY gh.run_id DESC LIMIT 1
-                """, (group.group_id, run_id)).fetchone()
+                    WHERE gh.group_id IN (?, ?) AND gh.run_id < ? ORDER BY gh.run_id DESC LIMIT 1
+                """, (group.group_id, legacy_id, run_id)).fetchone()
                 previous = json.loads(previous_row[0]) if previous_row else None
-                db.execute("""
-                    INSERT INTO groups(group_id,review_status,first_seen,last_seen) VALUES(?, 'NOVO', ?, ?)
-                    ON CONFLICT(group_id) DO UPDATE SET last_seen=excluded.last_seen
-                """, (group.group_id, now, now))
-                review = db.execute(
-                    "SELECT review_status FROM groups WHERE group_id=?", (group.group_id,)
-                ).fetchone()["review_status"]
-                group.review_status = review
-                current["review_status"] = review
+                self._observe_group(db, group, now, legacy_id)
+                current = dict(group.__dict__)
                 db.execute("""
                     INSERT OR REPLACE INTO group_history
                     (run_id,group_id,observed_at,related_ads_count,final_status,evidence_json)
@@ -260,7 +336,10 @@ class RadarStore:
         now = datetime.now(timezone.utc).isoformat()
         emitted: list[IncrementalEvent] = []
         with self.connect() as db:
-            known = {str(row[0]) for row in db.execute("SELECT group_id FROM groups").fetchall()}
+            # V1 identities cannot be treated as missing V2 offers.
+            known = {str(row[0]) for row in db.execute("""
+                SELECT DISTINCT group_id FROM group_history WHERE json_extract(evidence_json, '$.grouping_version')=2
+            """)}
             for group_id in observed_group_ids:
                 db.execute("""INSERT INTO group_freshness
                     (group_id,last_seen_cycle,last_seen_at,consecutive_full_absences,freshness_status)
@@ -342,11 +421,16 @@ class RadarStore:
             result.append(event("STATUS_CHANGED", [f"status tecnico mudou de {old_status} para {new_status}"]))
         if old_status != "CANDIDATO_RADAR" and new_status == "CANDIDATO_RADAR":
             result.append(event("ENTERED_RADAR", ["grupo passou a atender somente aos filtros tecnicos do Radar"]))
-        if old_status == "CANDIDATO_RADAR" and new_status != "CANDIDATO_RADAR" and old_ids <= new_ids:
+        coverage = after.get("coverage_context") or {}
+        if (
+            old_status == "CANDIDATO_RADAR" and new_status != "CANDIDATO_RADAR" and old_ids <= new_ids
+            and coverage.get("kind") != "PARTIAL_COVERAGE"
+        ):
             result.append(event("LEFT_RADAR", ["grupo deixou de atender aos filtros tecnicos do Radar"]))
         evidence_fields = (
             "keywords", "ad_ids", "start_dates", "ages_days", "destination_urls",
             "destination_domains", "grouping_confidence", "criterion_5_plus", "criterion_max_age",
+            "confidence_reasons", "conflicting_evidence", "noise_flags", "grouping_migration", "separation_level",
         )
         changed = [field for field in evidence_fields if before.get(field) != after.get(field)]
         if changed:
@@ -359,7 +443,9 @@ class RadarStore:
         kinds = {event.event_type for event in events}
         status = group["final_status"]
         review = group["review_status"]
-        if "ENTERED_RADAR" in kinds:
+        if group.get("grouping_migration") == "AMBIGUOUS" and kinds & {"NEW_GROUP", "EVIDENCE_CHANGED"}:
+            queue_type, priority, reason = "REVISAR_AMBIGUIDADE", 40, "historico V1 exige conciliacao humana"
+        elif "ENTERED_RADAR" in kinds:
             queue_type, priority, reason = "ENTROU_NO_RADAR", 10, "entrou nos filtros tecnicos do Radar"
         elif "NEW_GROUP" in kinds and status == "CANDIDATO_RADAR":
             queue_type, priority, reason = "NOVO_CANDIDATO", 20, "novo grupo ja atende aos filtros tecnicos"
@@ -371,6 +457,10 @@ class RadarStore:
             queue_type, priority, reason = (
                 "SAIU_DO_RADAR", 50, "deixou os filtros tecnicos; decisao humana foi preservada"
             )
+        elif kinds == {"EVIDENCE_CHANGED"} and group.get("grouping_migration") == "MATCHED" and (
+            events[0].before or {}
+        ).get("grouping_version") is None:
+            return None
         elif kinds & {"NEW_GROUP", "NEW_ADS", "COUNT_INCREASED", "STATUS_CHANGED", "EVIDENCE_CHANGED"}:
             queue_type, priority, reason = "ACOMPANHAR", 60, "mudanca material observada"
         else:
@@ -422,12 +512,18 @@ class RadarStore:
         if status not in REVIEW_STATUSES:
             raise ValueError(f"invalid review status: {status}")
         with self.connect() as db:
-            if db.execute("UPDATE groups SET review_status=? WHERE group_id=?", (status, group_id)).rowcount != 1:
+            if db.execute("""
+                UPDATE groups SET review_status=? WHERE group_id=?
+                    OR group_id=(SELECT group_id FROM grouping_aliases WHERE legacy_group_id=?)
+                    OR group_id=(SELECT legacy_group_id FROM grouping_aliases WHERE group_id=?)
+            """, (status, group_id, group_id, group_id)).rowcount == 0:
                 raise KeyError(group_id)
 
     def group_history(self, group_id: str) -> list[int]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT related_ads_count FROM group_history WHERE group_id=? ORDER BY run_id", (group_id,)
+                """SELECT related_ads_count FROM group_history WHERE group_id=?
+                   OR group_id=(SELECT legacy_group_id FROM grouping_aliases WHERE group_id=?)
+                   ORDER BY run_id""", (group_id, group_id)
             ).fetchall()
         return [int(row[0]) for row in rows]

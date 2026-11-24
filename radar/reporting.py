@@ -11,8 +11,31 @@ def render_json(report: RadarReport) -> str:
     return json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
 
 
+def _identity_lines(group: dict) -> list[str]:
+    lines = [f"- Grupo: {group['group_id']} (V{group.get('grouping_version', 1)})"]
+    for key, label in (
+        ("confidence_reasons", "Evidencias de identidade"),
+        ("conflicting_evidence", "Evidencias conflitantes"),
+        ("noise_flags", "Sinais de ruido"),
+        ("legacy_group_ids", "Grupos V1 relacionados"),
+    ):
+        if values := group.get(key):
+            lines.append(f"- {label}: {', '.join(values)}")
+    if separation := group.get("separation_level"):
+        lines.append(f"- Evidencia de separacao: {separation}")
+    if migration := group.get("grouping_migration"):
+        lines.append(f"- Correspondencia V1: {migration}")
+    if first := group.get("first_observed_at"):
+        lines.append(f"- Primeira/ultima observacao: {first} / {group.get('last_observed_at')}")
+    if context := group.get("coverage_context"):
+        lines.append(f"- Ciclo / cobertura: {context.get('cycle_id')} / {context.get('kind')}")
+        if "current_related_ads_count" in context:
+            lines.append(f"- IDs observados no ciclo atual: {context['current_related_ads_count']}")
+    return lines
+
+
 def render_markdown(report: RadarReport) -> str:
-    lines = ["# Relatorio Radar Low-Ticket — Fase 3", "", f"> {report.disclaimer}", ""]
+    lines = ["# Relatorio Radar Low-Ticket — Fase 4B", "", f"> {report.disclaimer}", ""]
     lines += [
         f"- Observacoes coletadas: {report.collection['observations']}",
         f"- IDs de anuncio unicos: {report.collection['unique_ad_ids']}",
@@ -23,6 +46,7 @@ def render_markdown(report: RadarReport) -> str:
         lines += [
             f"## {group.offer_name or 'Oferta nao identificada'} — {group.final_status} / {group.review_status}",
             "",
+            *_identity_lines(vars(group)),
             f"- Anunciante/page_id: {group.advertiser or 'desconhecido'} / {group.page_id or 'ausente'}",
             f"- Anuncios relacionados: {group.related_ads_count} (observacoes no grupo: {group.total_collected})",
             "- Criativos unicos/duplicados estimados: "
@@ -50,7 +74,7 @@ def render_queue_json(items: list[ReviewQueueItem]) -> str:
 
 
 def render_queue_markdown(items: list[ReviewQueueItem]) -> str:
-    lines = ["# Fila de revisao incremental — Fase 3", "",
+    lines = ["# Fila de revisao incremental — Fase 4B", "",
              "> Entrada no Radar indica somente filtros tecnicos; nao e validacao comercial.", ""]
     if not items:
         return "\n".join(lines + ["Nenhuma mudanca material pendente."])
@@ -62,7 +86,10 @@ def render_queue_markdown(items: list[ReviewQueueItem]) -> str:
         new_ids = sorted(set(group.get("ad_ids", [])) - old_ids)
         lines += [
             f"## P{item.priority} · {item.queue_type} · {group.get('offer_name') or item.group_id}", "",
-            f"- Anunciante: {group.get('advertiser') or 'desconhecido'}",
+            *_identity_lines(group),
+            f"- Anunciante/page_id: {group.get('advertiser') or 'desconhecido'} / {group.get('page_id') or 'ausente'}",
+            f"- Criativos unicos estimados: {group.get('unique_creatives_estimate')}",
+            f"- Idade em dias: {', '.join(str(age) for age in group.get('ages_days', []) if age is not None)}",
             f"- Contagem antes -> agora: {old_count} -> {group.get('related_ads_count')}",
             f"- Novos IDs: {', '.join(new_ids) or 'nenhum'}",
             f"- IDs atuais: {', '.join(group.get('ad_ids', [])) or 'ausentes'}",
@@ -87,6 +114,7 @@ def render_cycle_json(cycle: CollectionCycle, report: RadarReport | None = None,
     )
     if report is not None:
         payload["collection"] = report.collection
+        payload["groups"] = report.to_dict()["groups"]
     if events is not None:
         counts: dict[str, int] = {}
         for event in events:
@@ -128,4 +156,6 @@ def render_cycle_markdown(cycle: CollectionCycle, report: RadarReport | None = N
         lines.append("- Eventos: " + (", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "nenhum"))
     if queue is not None:
         lines.append(f"- Fila pendente: {len(queue)}")
+    if report is not None:
+        lines += ["", render_markdown(report)]
     return "\n".join(lines)

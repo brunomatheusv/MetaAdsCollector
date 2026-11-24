@@ -92,23 +92,41 @@ def get_cycle(store: RadarStore, cycle_id: str) -> CollectionCycle:
 
 
 def _merge_partial_with_known(store: RadarStore, report: RadarReport, cycle_id: str) -> None:
+    current_owners = {ad_id: group.group_id for group in report.groups for ad_id in group.ad_ids}
     for group in report.groups:
         previous = store.latest_group_evidence(group.group_id)
         group.coverage_context = {"kind": "PARTIAL_COVERAGE", "cycle_id": cycle_id}
-        if not previous:
+        if not previous or group.evidence_level != "STRONG_SAME_OFFER":
             continue
         old_ids = set(previous.get("ad_ids", []))
-        group.ad_ids = sorted(old_ids | set(group.ad_ids))
-        group.related_ads_count = max(
-            len(group.ad_ids), int(previous.get("related_ads_count", 0)), group.related_ads_count
-        )
+        if any(current_owners.get(ad_id, group.group_id) != group.group_id for ad_id in old_ids):
+            group.conflicting_evidence.append("ad_id_historico_observado_em_outra_identidade")
+            group.noise_flags = sorted(set(group.noise_flags) | {"sinais_de_identidade_conflitantes"})
+            group.confidence_reasons.extend(group.conflicting_evidence)
+            group.grouping_confidence = "BAIXA"
+            group.evidence_level = "AMBIGUOUS"
+            if group.final_status != "EVIDENCIA_INSUFICIENTE":
+                group.final_status = "INVESTIGAR"
+            group.reasons.append("identidade atual diverge da atribuicao historica")
+            continue
+        current_ids = set(group.ad_ids)
+        group.coverage_context["current_related_ads_count"] = group.related_ads_count
+        group.coverage_context["historical_only_ad_ids"] = sorted(old_ids - current_ids)
+        group.ad_ids = sorted(old_ids | current_ids)
+        group.related_ads_count = len(group.ad_ids)
         group.keywords = sorted(set(previous.get("keywords", [])) | set(group.keywords))
         group.destination_urls = sorted(set(previous.get("destination_urls", [])) | set(group.destination_urls))
         group.destination_domains = sorted(
             set(previous.get("destination_domains", [])) | set(group.destination_domains)
         )
-        if previous.get("final_status") == "CANDIDATO_RADAR" and group.final_status != "CANDIDATO_RADAR":
+        if (
+            previous.get("final_status") == "CANDIDATO_RADAR"
+            and group.final_status == "REJEITADO"
+            and group.criterion_max_age == "PASSA"
+            and group.criterion_5_plus == "FALHA"
+        ):
             group.final_status = "CANDIDATO_RADAR"
+            group.criterion_5_plus = "PASSA"
             group.reasons.append("status anterior preservado porque a cobertura deste ciclo e parcial")
 
 
