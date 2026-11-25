@@ -20,3 +20,4 @@ prune mcp/test-results
 prune _local_audit
 exclude metaads_audit_report.md
 exclude docs_decision_checklist.html
+include radar/OPERACAO-DIARIA.md

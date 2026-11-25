@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 
-from .commercial import classify, render_commercial
+from .commercial import DEFAULT_CEILING_BRL, PRICE_PRIORITY_POINTS, classify, render_commercial
+from .commercial_auto import CommercialInspection
 from .cycle import _run_cycle, get_cycle, saved_cycle_report, start_cycle
 from .lp import LPConfig, investigate_groups
 from .models import RadarConfig
@@ -55,12 +57,90 @@ def _cycle_events(store, cycle):
     return [event for run_id in cycle.run_ids for event in store.events(run_id)]
 
 
-def _export(workspace, store, cycle, report, limit):
+def _daily_signature(row):
+    return [row[k] for k in ("name", "price", "currency", "format", "promise", "checkout")]
+
+
+def _daily_shortlist(workspace, cycle, assessed, limit, *, record):
+    path = workspace / "historico-shortlist.json"
+    if path.resolve() != path:
+        raise ValueError("arquivo de histórico comercial redirecionado")
+    history = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    last = history.setdefault("last", {})
+    daily = history.setdefault("daily", {})
+    qualified = {row["group_id"]: row for row in assessed if row["qualified"]}
+    if cycle.cycle_id in daily and (record or daily[cycle.cycle_id]):
+        chosen = [qualified[key] for key in daily[cycle.cycle_id] if key in qualified]
+    else:
+        ranked = sorted(
+            qualified.values(),
+            key=lambda row: (
+                row["group_id"] in last,
+                -PRICE_PRIORITY_POINTS.get(row.get("price_priority"), -1),
+                -row["priority"],
+                row["rank"],
+            ),
+        )
+        chosen = []
+        for row in ranked:
+            previous = last.get(row["group_id"])
+            if (
+                record
+                and previous
+                and (previous["signature"] == _daily_signature(row) and previous["observed_ads"] >= row["observed_ads"])
+            ):
+                continue
+            chosen.append(row)
+            if len(chosen) == limit:
+                break
+        if record and cycle.coverage_kind == "FULL_COVERAGE":
+            daily[cycle.cycle_id] = [row["group_id"] for row in chosen]
+            for row in chosen:
+                last[row["group_id"]] = {
+                    "observed_ads": row["observed_ads"],
+                    "signature": _daily_signature(row),
+                }
+            write_reports([(path, json.dumps(history, ensure_ascii=False, indent=2) + "\n")])
+    return [{**row, "rank": index} for index, row in enumerate(chosen[:limit], 1)]
+
+
+def _automatic_review(workspace, cycle, ranked, ceiling):
+    path = _report_files(workspace, cycle.cycle_id)[0].with_name("evidencia-automatica.json")
+    if path.resolve() != path:
+        raise ValueError("arquivo de evidência redirecionado")
+    stored = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if ceiling is None or (stored.get("runs") == cycle.run_ids and stored.get("ceiling_brl") == ceiling):
+        return stored if stored.get("runs") == cycle.run_ids else {}
+    inspection = CommercialInspection(ceiling)
+    assessed = {row["group_id"]: inspection.inspect(row) for row in ranked[:12] if row["destinations"]}
+    result = {
+        "runs": cycle.run_ids,
+        "ceiling_brl": ceiling,
+        "groups": assessed,
+        "http_requests": inspection.requests,
+        "errors": inspection.errors,
+        "hosts_paused": sorted(inspection.blocked),
+        "technical_groups_not_inspected": max(0, len(ranked) - 12),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_reports([(path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")])
+    return result
+
+
+def _export(workspace, store, cycle, report, limit, *, ceiling=None, record=False):
     events = _cycle_events(store, cycle)
     pending = store.review_queue()
     ranked = build_shortlist(report, events, limit=len(report.groups), review_status=store.review_statuses())
-    assessed = classify(workspace, store, cycle, ranked)
-    shortlist = [row for row in assessed if row["qualified"]][:limit]
+    automatic = _automatic_review(workspace, cycle, ranked, ceiling)
+    assessed = classify(
+        workspace,
+        store,
+        cycle,
+        ranked,
+        automatic=automatic.get("groups"),
+        ceiling=ceiling if ceiling is not None else automatic.get("ceiling_brl"),
+    )
+    shortlist = _daily_shortlist(workspace, cycle, assessed, min(limit, 5), record=record)
     technical = ranked[:limit]
     short_md = render_commercial(shortlist, cycle, shortlist=True)
     technical_md = render_shortlist(cycle, technical, limit=limit)
@@ -79,10 +159,15 @@ def _export(workspace, store, cycle, report, limit):
     payload = json.loads(render_cycle_json(cycle, report, events, pending))
     payload.update(
         {
-            "shortlist_limit": limit,
+            "shortlist_limit": min(limit, 5),
+            "technical_shortlist_limit": limit,
             "shortlist": shortlist,
             "technical_shortlist": technical,
             "commercial_assessments": assessed,
+            "commercial_ceiling_brl": ceiling
+            if ceiling is not None
+            else (automatic.get("ceiling_brl") or DEFAULT_CEILING_BRL),
+            "commercial_inspection": {key: value for key, value in automatic.items() if key != "groups"},
             "offers": offer_counts(report),
             "keywords": keyword_rows,
             "incremental_events": [event.to_dict() for event in events],
@@ -106,8 +191,17 @@ def _export(workspace, store, cycle, report, limit):
         [
             (short_path, short_md),
             (technical_path, technical_md),
-            (full_path, short_md + "\n" + render_commercial(assessed, cycle) + "\n"
-             + "\n".join(monitoring) + "\n" + tech_md + "\n"),
+            (
+                full_path,
+                short_md
+                + "\n"
+                + render_commercial(assessed, cycle)
+                + "\n"
+                + "\n".join(monitoring)
+                + "\n"
+                + tech_md
+                + "\n",
+            ),
             (json_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n"),
         ]
     )
@@ -124,6 +218,7 @@ def mine_once(
     limit: int = 5,
     report_cycle: str | None = None,
     lp_enrichment: bool = False,
+    commercial_ceiling: float | None = None,
     search=None,
     sleep=time.sleep,
 ) -> tuple:
@@ -150,7 +245,15 @@ def mine_once(
                     candidate_min=config.min_related_ads,
                     config=LPConfig(),
                 )
-        path, shortlisted = _export(workspace, store, cycle, report, limit)
+        path, shortlisted = _export(
+            workspace,
+            store,
+            cycle,
+            report,
+            limit,
+            ceiling=commercial_ceiling,
+            record=report_cycle is None,
+        )
         return cycle, path, shortlisted
 
 
@@ -167,10 +270,16 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--every-hours", type=int, metavar="HORAS", help="intervalo de monitoramento em primeiro plano")
     parser.add_argument("--report-cycle", metavar="ID", help="reexporta um ciclo salvo sem rede")
     parser.add_argument("--lp-enrichment", action="store_true", help="investigação opcional de landing pages")
+    parser.add_argument("--low-ticket-max-brl", type=float, help="teto em reais para verificar ofertas novas")
     args = parser.parse_args(argv)
+    ceiling = args.low_ticket_max_brl
+    if ceiling is None and not args.report_cycle:
+        ceiling = DEFAULT_CEILING_BRL
+    if ceiling is not None and (not math.isfinite(ceiling) or ceiling <= 0):
+        parser.error("--low-ticket-max-brl exige um valor finito e positivo")
     if args.every_hours is not None and not 1 <= args.every_hours <= 168:
         parser.error("--every-hours deve estar entre 1 e 168")
-    if args.report_cycle and (args.every_hours is not None or args.lp_enrichment):
+    if args.report_cycle and (args.every_hours is not None or args.lp_enrichment or ceiling is not None):
         parser.error("--report-cycle é uma exportação local sem rede")
     workspace = args.workspace.resolve()
     database = workspace / "radar.sqlite3"
@@ -193,6 +302,7 @@ def main(argv: list[str]) -> int:
                 limit=args.shortlist,
                 report_cycle=args.report_cycle,
                 lp_enrichment=args.lp_enrichment,
+                commercial_ceiling=ceiling,
             )
             _console(
                 f"{cycle.coverage_kind} {cycle.succeeded}/{cycle.total_keywords_expected} · "

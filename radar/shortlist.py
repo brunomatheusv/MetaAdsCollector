@@ -74,6 +74,7 @@ def build_shortlist(
             "new_ads_vs_history": len(fresh_ids),
             "first_start_date": group.first_start_date,
             "last_start_date": group.last_start_date,
+            "oldest_ad_age_days": max((a for a in group.ages_days if a is not None), default=None),
             "keywords": group.keywords,
             "event_types": sorted(event_types[group.group_id]),
             "ad_links": links,
