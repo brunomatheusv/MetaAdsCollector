@@ -557,9 +557,11 @@ class RadarStore:
         emitted: list[IncrementalEvent] = []
         with (nullcontext(connection) if connection is not None else self.connect()) as db:
             # V1 identities cannot be treated as missing V2 offers.
+            # A media alias target becomes eligible for absence tracking once observed and registered.
             known = {str(row[0]) for row in db.execute("""
-                SELECT DISTINCT COALESCE(m.canonical_id, h.group_id) FROM group_history h
+                SELECT DISTINCT g.group_id FROM group_history h
                 LEFT JOIN media_group_aliases m ON m.legacy_id=h.group_id
+                JOIN groups g ON g.group_id=COALESCE(m.canonical_id, h.group_id)
                 WHERE json_extract(h.evidence_json, '$.grouping_version')=2
             """)}
             for group_id in observed_group_ids:

@@ -58,7 +58,7 @@ def test_migration_keeps_review_history_and_reobservation_separate(tmp_path, mon
     def cycle(asset):
         group = start_cycle(terms, store, cfg)
         return run_cycle(store, group.cycle_id, terms, cfg, sleep=lambda _: None,
-                         search=lambda entry, _: [_ad(1, asset)] if entry == terms[0] else [])
+                         search=lambda entry, _: [_ad(1, asset)] if asset and entry == terms[0] else [])
 
     with monkeypatch.context() as patch:
         patch.setattr(normalize, "_media_identity", lambda url: url)
@@ -68,9 +68,20 @@ def test_migration_keeps_review_history_and_reobservation_separate(tmp_path, mon
     store.acknowledge(initial.run_ids[0], old)
     with store.connect() as db:
         db.execute("DELETE FROM radar_migrations")
+    absent, report = cycle(None)
+    assert absent.coverage_kind == "FULL_COVERAGE" and not report.groups
+    assert not store.events(absent.run_ids[-1])
+    assert store.freshness(old)["consecutive_full_absences"] == 0
+    with store.connect() as db:
+        target = db.execute("SELECT canonical_id FROM media_group_aliases WHERE legacy_id=?", (old,)).fetchone()[0]
+        assert db.execute("SELECT group_id FROM groups WHERE group_id=?", (target,)).fetchone() is None
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert not db.execute("PRAGMA foreign_key_check").fetchall()
+
     stable, report = cycle(CDN + "?oh=2&sku=A")
     migrated = report.groups[0]
-    assert migrated.group_id != old and migrated.review_status == "ACOMPANHAR"
+    assert migrated.group_id == target and migrated.group_id != old
+    assert migrated.review_status == "ACOMPANHAR"
     assert store.group_history(migrated.group_id) == [1, 1]
     assert not store.events(stable.run_ids[0])
     assert not store.review_queue(initial.run_ids[0])
@@ -78,6 +89,7 @@ def test_migration_keeps_review_history_and_reobservation_separate(tmp_path, mon
     changed, report = cycle(CDN + "?oh=3&sku=B")
     assert report.groups[0].group_id != migrated.group_id and report.groups[0].review_status == "NOVO"
     assert [e.event_type for e in store.events(changed.run_ids[0])] == ["CREATIVE_REOBSERVED"]
+    assert store.freshness(migrated.group_id)["consecutive_full_absences"] == 1
     assert store.review_statuses()[old] == "ACOMPANHAR"
 
 
