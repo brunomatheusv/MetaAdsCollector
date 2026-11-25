@@ -206,3 +206,35 @@ As opções `--lp-min-ids`, `--lp-ttl-hours`, `--lp-timeout`,
 `--lp-max-redirects`, `--lp-max-bytes` e `--lp-max-urls` configuram o gate,
 o cache e os limites de inspeção. A cobertura FULL/PARTIAL continua descrevendo
 o processamento dos termos da Meta.
+
+## Fase 4D — recuperação e diagnóstico
+
+Uma interrupção preserva os checkpoints já confirmados. Repita o comando com
+`--cycle-action resume`, o mesmo ID, registry e parâmetros. O Radar reconhece
+runs interrompidos e retoma apenas keywords pendentes ou com erro. A finalização
+grava histórico, fila, frescor e conclusão do ciclo na mesma transação.
+Uma execução concorrente contra o mesmo banco é recusada. O arquivo auxiliar
+`*.lock.sqlite3` usa um bloqueio mantido pelo SQLite e liberado ao sair do
+processo. Não apague esse arquivo durante uma execução.
+
+O Radar pausa o ciclo diante de bloqueio ou rate limit e mantém a cobertura
+parcial. Um timeout pode receber uma repetição curta, além dos mecanismos
+do coletor. Respostas com sinal de coleta incompleta e checkpoints
+inconsistentes não contam como buscas vazias bem-sucedidas. Ao receber um
+bloqueio externo, retome somente depois de o acesso ser restabelecido.
+
+Use `--log-json radar-operacao.jsonl` para registrar IDs, tentativas, categorias
+de erro, recuperação e conclusão. O log operacional não inclui mensagens
+brutas do coletor. Para recuperar os relatórios técnicos a partir de um
+snapshot finalizado, sem rede ou nova coleta:
+
+```bash
+meta-ads-radar --cycle-action report --cycle-id CYCLE_ID \
+  --database radar.sqlite3 --json-output radar.json --markdown-output radar.md
+```
+
+Os arquivos são gravados em UTF-8 e publicados por substituição atômica
+individual. Se a exportação falhar depois da coleta, use `report` para repetir
+a geração. Para exportar evidência de LP, use separadamente o replay opt-in.
+Transfira o banco por backup SQLite verificado, com os relatórios e o SHA
+Git associados. O arquivo de bloqueio local não faz parte do backup.

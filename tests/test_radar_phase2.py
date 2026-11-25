@@ -115,6 +115,11 @@ def test_live_adapter_uses_collector_status_enum(monkeypatch, tmp_path):
     calls = []
 
     class FakeCollector:
+        def __init__(self):
+            from meta_ads_collector.events import EventEmitter
+
+            self.event_emitter = EventEmitter()
+
         def __enter__(self):
             return self
 
@@ -123,6 +128,7 @@ def test_live_adapter_uses_collector_status_enum(monkeypatch, tmp_path):
 
         def search(self, **kwargs):
             calls.append(kwargs)
+            self.event_emitter.emit("collection_finished", {"total_pages": 1})
             return []
 
     monkeypatch.setattr("radar.batch.MetaAdsCollector", FakeCollector)

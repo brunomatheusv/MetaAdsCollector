@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 
 from meta_ads_collector import Ad, MetaAdsCollector
+from meta_ads_collector.exceptions import AuthenticationError, RateLimitError, SessionExpiredError
 
-from .models import RadarConfig, RadarReport
+from .models import EvidenceGroup, RadarConfig, RadarReport
+from .operations import checkpoint_ads, collect_keyword, collection_lock, diagnostic, failure_kind, search_with_retry
 from .pipeline import analyze_ads
 from .registry import KeywordEntry
 from .storage import RadarStore
@@ -34,43 +37,66 @@ def run_batch(entries: list[KeywordEntry], store: RadarStore, config: RadarConfi
               run_id: int | None = None,
               search: Callable[[KeywordEntry, RadarConfig], Iterable[Ad]] | None = None,
               sleep: Callable[[float], None] = time.sleep) -> tuple[int, RadarReport, BatchMetrics]:
-    config = config or RadarConfig()
+    with collection_lock(store.path):
+        return _run_batch(entries, store, config or RadarConfig(), run_id, search, sleep)
+
+
+def _run_batch(entries, store, config, run_id, search, sleep):
     started = time.monotonic()
-    run_id = run_id or store.start_run(asdict(config))
+    plan = {entry.id: (entry.text, entry.source) for entry in entries}
+    if len(plan) != len(entries):
+        raise ValueError("batch requires distinct keyword IDs")
+    stored_config = {**asdict(config), "keyword_plan": {key: list(value) for key, value in plan.items()}}
+    run_id = run_id if run_id is not None else store.start_run(stored_config)
+    run = store.run_row(run_id)
+    old_config = json.loads(run["config_json"])
+    if old_config not in (stored_config, asdict(config)):
+        raise ValueError("batch checkpoint configuration or plan differs")
     metrics = BatchMetrics()
-    records: list[tuple[Ad, set[str]]] = []
+    existing = store.batch_keywords(run_id)
+    for row in existing:
+        if plan.get(row["keyword_id"]) != (row["keyword_text"], row["source"]):
+            raise ValueError("batch checkpoint keywords differ")
+        checkpoint_ads(row)
+    finalized = run["status"] in {"COMPLETED", "COMPLETED_WITH_ERRORS"}
+    if finalized and len(existing) != len(entries):
+        raise ValueError("batch already finalized; use cycles to retry failed keywords")
 
-    def default_search(entry: KeywordEntry, cfg: RadarConfig) -> Iterable[Ad]:
-        with MetaAdsCollector() as collector:
-            return list(collector.search(query=entry.text, country=cfg.country, status=cfg.status.upper(),
-                                         max_results=cfg.max_results_per_keyword))
+    def default_search(entry, cfg):
+        return collect_keyword(entry, cfg, collector_factory=MetaAdsCollector)
 
-    search_fn = search or default_search
     for index, entry in enumerate(entries):
         if store.keyword_done(run_id, entry.id):
             continue
         metrics.requests += 1
         try:
-            ads = list(search_fn(entry, config))
-            metrics.raw_ads += len(ads)
-            metrics.empty_results += not ads
-            for ad in ads:
-                records.append((ad, {entry.text}))
-                store.record_ad_origin(run_id, str(ad.id), entry.id)
-            store.record_keyword(run_id, entry.id, entry.text, entry.source, "OK", len(ads))
-        except Exception as exc:  # one failed query must not abort the run
+            ads = search_with_retry(search or default_search, entry, config, sleep, run_id=run_id)
+        except Exception as exc:
+            kind = failure_kind(exc)
             metrics.errors += 1
-            message = str(exc).casefold()
-            metrics.possible_rate_limits += any(
-                signal in message for signal in ("rate limit", "429", "verification", "checkpoint", "blocked")
-            )
-            store.record_keyword(run_id, entry.id, entry.text, entry.source, "ERROR", error=str(exc))
+            metrics.possible_rate_limits += kind in {"rate_limit", "access_blocked"}
+            store.checkpoint_search(run_id, entry, [], error=kind)
+            if isinstance(exc, (RateLimitError, AuthenticationError, SessionExpiredError)):
+                break
             if config.backoff_seconds:
                 sleep(config.backoff_seconds)
+        else:
+            store.checkpoint_search(run_id, entry, ads)
+            diagnostic("keyword_checkpointed", run_id=run_id, keyword_id=entry.id, observations=len(ads))
         if (index + 1) % config.batch_size == 0 and index + 1 < len(entries) and config.interval_seconds:
             sleep(config.interval_seconds)
 
+    rows = store.batch_keywords(run_id)
+    records = [(ad, {row["keyword_text"]}) for row in rows for ad in checkpoint_ads(row)]
+    metrics.raw_ads = len(records)
+    metrics.empty_results = sum(row["raw_count"] == 0 for row in rows)
     report = analyze_ads(records, config)
+    if finalized:
+        report.groups = [EvidenceGroup(**row) for row in store.run_group_snapshots(run_id)]
+        report.collection["groups"] = len(report.groups)
+    if len(rows) != len(entries):
+        for group in report.groups:
+            group.coverage_context = {"kind": "PARTIAL_COVERAGE"}
     metrics.unique_ads = report.collection["unique_ad_ids"]
     metrics.groups = len(report.groups)
     for group in report.groups:
@@ -79,6 +105,6 @@ def run_batch(entries: list[KeywordEntry], store: RadarStore, config: RadarConfi
             setattr(metrics, field, getattr(metrics, field) + 1)
     metrics.duration_seconds = round(time.monotonic() - started, 3)
     report.collection.update(asdict(metrics))
-    store.persist_report(run_id, report)
-    store.finish_run(run_id, "COMPLETED_WITH_ERRORS" if metrics.errors else "COMPLETED")
+    if not finalized:
+        store.finalize_batch(run_id, report, incomplete=len(rows) != len(entries))
     return run_id, report, metrics

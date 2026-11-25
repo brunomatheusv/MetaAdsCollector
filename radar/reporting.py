@@ -160,8 +160,6 @@ def render_cycle_markdown(cycle: CollectionCycle, report: RadarReport | None = N
         lines.append(f"- Fila pendente: {len(queue)}")
     if report is not None:
         lines += ["", render_markdown(report)]
-    if report and (enrichment := report.collection.get("lp_enrichment")):
-        lines.extend(["", render_lp_markdown(enrichment)])
     return "\n".join(lines)
 
 

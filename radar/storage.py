@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import pickle
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +45,10 @@ class RadarStore:
                     requested_url TEXT NOT NULL, identity_version INTEGER NOT NULL,
                     fetched_epoch REAL NOT NULL, result_json TEXT NOT NULL,
                     PRIMARY KEY(requested_url, identity_version, fetched_epoch)
+                );
+                CREATE TABLE IF NOT EXISTS batch_payloads (
+                    run_id INTEGER NOT NULL, keyword_id TEXT NOT NULL, payload BLOB NOT NULL,
+                    PRIMARY KEY(run_id, keyword_id), FOREIGN KEY(run_id) REFERENCES runs(id)
                 );
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
@@ -162,6 +167,82 @@ class RadarStore:
                 status, datetime.now(timezone.utc).isoformat() if finished else None, reason, cycle_id,
             ))
 
+    def begin_cycle_run(self, cycle_id: str, config: dict) -> tuple[int, int]:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            recovered = db.execute(
+                """UPDATE runs SET status='INTERRUPTED', finished_at=?
+                   WHERE status='RUNNING' AND id IN (SELECT run_id FROM cycle_runs WHERE cycle_id=?)""",
+                (now, cycle_id),
+            ).rowcount
+            run_id = db.execute(
+                "INSERT INTO runs(started_at,status,config_json) VALUES(?,'RUNNING',?)",
+                (now, json.dumps({**config, "cycle_id": cycle_id}, sort_keys=True)),
+            ).lastrowid
+            db.execute("INSERT INTO cycle_runs VALUES(?,?)", (cycle_id, run_id))
+            db.execute(
+                "UPDATE collection_cycles SET status='RUNNING', finished_at=NULL, reason=NULL WHERE cycle_id=?",
+                (cycle_id,),
+            )
+        return int(run_id), recovered
+
+    def checkpoint_search(self, run_id, entry, ads, *, cycle_id=None, error=None):
+        now = datetime.now(timezone.utc).isoformat()
+        status = "OK" if error is None else "ERROR"
+        count = len(ads)
+        payload = pickle.dumps(ads) if error is None else None
+        with self.connect() as db:
+            if cycle_id is not None:
+                updated = db.execute(
+                    """UPDATE cycle_keywords SET status=?,raw_count=?,error=?,payload=?,
+                       attempts=attempts+1,updated_at=? WHERE cycle_id=? AND keyword_id=? AND status<>'OK'""",
+                    (status, count, error, payload, now, cycle_id, entry.id),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("inconsistent keyword checkpoint")
+            elif payload is not None:
+                db.execute("INSERT INTO batch_payloads VALUES(?,?,?)", (run_id, entry.id, payload))
+            db.execute(
+                """INSERT INTO keyword_results VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,keyword_id)
+                   DO UPDATE SET status=excluded.status,raw_count=excluded.raw_count,error=excluded.error""",
+                (run_id, entry.id, entry.text, entry.source, status, count, error),
+            )
+            db.executemany(
+                "INSERT OR IGNORE INTO ad_observations VALUES(?,?,?,?)",
+                [(run_id, str(ad.id), entry.id, now) for ad in ads],
+            )
+
+    def batch_keywords(self, run_id: int) -> list[sqlite3.Row]:
+        with self.connect() as db:
+            return db.execute(
+                """SELECT k.*, p.payload FROM keyword_results k LEFT JOIN batch_payloads p
+                   USING(run_id,keyword_id) WHERE k.run_id=? AND k.status='OK' ORDER BY k.rowid""",
+                (run_id,),
+            ).fetchall()
+
+    def finalize_batch(self, run_id: int, report: RadarReport, *, incomplete: bool) -> None:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.persist_report(run_id, report, connection=db)
+            db.execute("UPDATE runs SET status=?,finished_at=? WHERE id=?", (
+                "COMPLETED_WITH_ERRORS" if incomplete else "COMPLETED",
+                datetime.now(timezone.utc).isoformat(), run_id,
+            ))
+
+    def finalize_cycle(self, cycle_id, run_id, report, *, full, unfinished, status, reason):
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.persist_report(run_id, report, connection=db)
+            self.reconcile_cycle(cycle_id, run_id, {group.group_id for group in report.groups},
+                                 full=full, connection=db)
+            run_status = "COMPLETED_WITH_ERRORS" if unfinished else "COMPLETED"
+            db.execute("UPDATE runs SET status=?,finished_at=? WHERE id=?", (run_status, now, run_id))
+            db.execute(
+                "UPDATE collection_cycles SET status=?,finished_at=?,reason=? WHERE cycle_id=?",
+                (status, None if unfinished else now, reason, cycle_id),
+            )
+
     def cycle_run_ids(self, cycle_id: str) -> list[int]:
         with self.connect() as db:
             rows = db.execute("SELECT run_id FROM cycle_runs WHERE cycle_id=? ORDER BY run_id", (cycle_id,)).fetchall()
@@ -175,6 +256,13 @@ class RadarStore:
                 (now, json.dumps(config, ensure_ascii=False, sort_keys=True)),
             )
             return int(cur.lastrowid)
+
+    def run_row(self, run_id: int) -> sqlite3.Row:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return row
 
     def finish_run(self, run_id: int, status: str = "COMPLETED") -> None:
         with self.connect() as db:
@@ -282,11 +370,13 @@ class RadarStore:
         group.first_observed_at = row["first_seen"]
         group.last_observed_at = row["last_seen"]
 
-    def persist_report(self, run_id: int, report: RadarReport) -> list[IncrementalEvent]:
+    def persist_report(self, run_id: int, report: RadarReport, *,
+                       connection: sqlite3.Connection | None = None) -> list[IncrementalEvent]:
         now = datetime.now(timezone.utc).isoformat()
         events: list[IncrementalEvent] = []
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with (nullcontext(connection) if connection is not None else self.connect()) as db:
+            if connection is None:
+                db.execute("BEGIN IMMEDIATE")
             migrations = self._grouping_migrations(db, report)
             for group in report.groups:
                 legacy_id = migrations.get(group.group_id)
@@ -376,12 +466,13 @@ class RadarStore:
         return {str(row[0]) for row in rows}
 
     def reconcile_cycle(
-        self, cycle_id: str, run_id: int, observed_group_ids: set[str], *, full: bool
+        self, cycle_id: str, run_id: int, observed_group_ids: set[str], *, full: bool,
+        connection: sqlite3.Connection | None = None,
     ) -> list[IncrementalEvent]:
         """Update freshness. Absence is actionable only after two consecutive FULL cycles."""
         now = datetime.now(timezone.utc).isoformat()
         emitted: list[IncrementalEvent] = []
-        with self.connect() as db:
+        with (nullcontext(connection) if connection is not None else self.connect()) as db:
             # V1 identities cannot be treated as missing V2 offers.
             known = {str(row[0]) for row in db.execute("""
                 SELECT DISTINCT group_id FROM group_history WHERE json_extract(evidence_json, '$.grouping_version')=2

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import pickle
 import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from meta_ads_collector import Ad, MetaAdsCollector
+from meta_ads_collector import Ad
 
-from .models import CollectionCycle, RadarConfig, RadarReport
+from .models import CollectionCycle, EvidenceGroup, RadarConfig, RadarReport
+from .operations import checkpoint_ads, collect_keyword, collection_lock, diagnostic, failure_kind, search_with_retry
 from .pipeline import analyze_ads
 from .registry import FERNANDO_EXPECTED_COUNT, FERNANDO_SOURCE, KeywordEntry
 from .storage import RadarStore
@@ -33,8 +33,8 @@ def _registry_identity(entries: list[KeywordEntry]) -> tuple[str, str]:
 
 
 def start_cycle(entries: list[KeywordEntry], store: RadarStore, config: RadarConfig | None = None) -> CollectionCycle:
-    if not entries:
-        raise ValueError("cycle plan requires at least one keyword")
+    if not entries or len({entry.id for entry in entries}) != len(entries):
+        raise ValueError("cycle plan requires nonempty, distinct keyword IDs")
     config = config or RadarConfig()
     registry_hash, plan_hash = _registry_identity(entries)
     official = len(entries) == FERNANDO_EXPECTED_COUNT and all(entry.source == FERNANDO_SOURCE for entry in entries)
@@ -74,7 +74,10 @@ def get_cycle(store: RadarStore, cycle_id: str) -> CollectionCycle:
     attempted = sum(item["attempts"] > 0 for item in keywords)
     expected = int(row["total_keywords_expected"])
     pending = expected - attempted
-    full = bool(row["official_plan"]) and succeeded == expected and failed == 0 and pending == 0
+    full = (
+        row["status"] == "COMPLETED" and bool(row["official_plan"])
+        and succeeded == expected and failed == 0 and pending == 0
+    )
     started_at, finished_at = row["started_at"], row["finished_at"]
     duration = None
     if finished_at:
@@ -141,7 +144,11 @@ def run_cycle(
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[CollectionCycle, RadarReport]:
     """Run pending/failed keywords only. ``max_keywords`` provides a controlled interruption point."""
-    config = config or RadarConfig()
+    with collection_lock(store.path):
+        return _run_cycle(store, cycle_id, entries, config or RadarConfig(), search, max_keywords, sleep)
+
+
+def _run_cycle(store, cycle_id, entries, config, search, max_keywords, sleep):
     row = store.cycle_row(cycle_id)
     registry_hash, plan_hash = _registry_identity(entries)
     if registry_hash != row["registry_hash"] or plan_hash != row["plan_hash"]:
@@ -152,47 +159,53 @@ def run_cycle(
         raise ValueError("cycle is already completed; start the next cycle instead of re-executing it")
 
     by_id = {entry.id: entry for entry in entries}
-    work = [item for item in store.cycle_keywords(cycle_id) if item["status"] in {"PENDING", "ERROR"}]
+    checkpoint = store.cycle_keywords(cycle_id)
+    if [(r["keyword_id"], r["keyword_text"], r["source"]) for r in checkpoint] != [
+        (entry.id, entry.text, entry.source) for entry in entries
+    ] or any(r["status"] not in {"PENDING", "ERROR", "OK"} for r in checkpoint):
+        raise ValueError("cycle checkpoint keywords differ from the saved plan")
+    for item in checkpoint:
+        if item["status"] == "OK":
+            checkpoint_ads(item)
+    work = [item for item in checkpoint if item["status"] != "OK"]
     if max_keywords is not None:
         work = work[:max_keywords]
-    run_id = store.start_run({**asdict(config), "cycle_id": cycle_id})
-    store.attach_cycle_run(cycle_id, run_id)
-    store.update_cycle(cycle_id, "RUNNING", finished=False)
+    run_id, recovered = store.begin_cycle_run(cycle_id, asdict(config))
+    diagnostic("cycle_run_started", cycle_id=cycle_id, run_id=run_id, recovered_runs=recovered, remaining=len(work))
 
-    def default_search(entry: KeywordEntry, cfg: RadarConfig) -> Iterable[Ad]:
-        with MetaAdsCollector() as collector:
-            return list(collector.search(
-                query=entry.text, country=cfg.country, status=cfg.status.upper(),
-                max_results=cfg.max_results_per_keyword,
-            ))
-
-    search_fn = search or default_search
+    consecutive_transport_errors = 0
+    pause_reason = None
     for index, item in enumerate(work):
         entry = by_id[item["keyword_id"]]
         try:
-            ads = list(search_fn(entry, config))
-            store.record_cycle_keyword(cycle_id, entry.id, "OK", len(ads), payload=pickle.dumps(ads))
-            store.record_keyword(run_id, entry.id, entry.text, entry.source, "OK", len(ads))
-            for ad in ads:
-                store.record_ad_origin(run_id, str(ad.id), entry.id)
+            ads = search_with_retry(search or collect_keyword, entry, config, sleep, run_id=run_id)
         except Exception as exc:
-            store.record_cycle_keyword(cycle_id, entry.id, "ERROR", error=str(exc))
-            store.record_keyword(run_id, entry.id, entry.text, entry.source, "ERROR", error=str(exc))
+            kind = failure_kind(exc)
+            store.checkpoint_search(run_id, entry, [], cycle_id=cycle_id, error=kind)
+            consecutive_transport_errors = (
+                consecutive_transport_errors + 1 if kind in {"transient_transport", "incomplete_search"} else 0
+            )
+            if kind in {"rate_limit", "access_blocked"} or consecutive_transport_errors >= 3:
+                pause_reason = kind
+                diagnostic("cycle_paused", cycle_id=cycle_id, run_id=run_id, reason=kind)
+                break
             if config.backoff_seconds:
                 sleep(config.backoff_seconds)
+        else:
+            consecutive_transport_errors = 0
+            store.checkpoint_search(run_id, entry, ads, cycle_id=cycle_id)
+            diagnostic("keyword_checkpointed", run_id=run_id, keyword_id=entry.id, observations=len(ads))
         if (index + 1) % config.batch_size == 0 and index + 1 < len(work) and config.interval_seconds:
             sleep(config.interval_seconds)
 
     records: list[tuple[Ad, set[str]]] = []
     rows = store.cycle_keywords(cycle_id)
     for item in rows:
-        if item["status"] != "OK" or item["payload"] is None:
-            continue
-        for ad in pickle.loads(item["payload"]):  # noqa: S301 - private, trusted local checkpoint DB
-            records.append((ad, {item["keyword_text"]}))
+        if item["status"] == "OK":
+            records.extend((ad, {item["keyword_text"]}) for ad in checkpoint_ads(item))
     report = analyze_ads(records, config)
     cycle = get_cycle(store, cycle_id)
-    full = cycle.coverage_kind == "FULL_COVERAGE"
+    full = cycle.official_plan and cycle.succeeded == cycle.total_keywords_expected
     if not full:
         _merge_partial_with_known(store, report, cycle_id)
     else:
@@ -201,24 +214,37 @@ def run_cycle(
     suppressed = len(store.known_group_ids() - {group.group_id for group in report.groups}) if not full else 0
     report.collection.update({
         "cycle": cycle.to_dict(),
-        "coverage": cycle.coverage_kind,
+        "coverage": "FULL_COVERAGE" if full else "PARTIAL_COVERAGE",
         "suppressed_absence_events": suppressed,
         "depth_limit_notice": (
             f"FULL cobre o plano oficial de {FERNANDO_EXPECTED_COUNT} keywords; limit={config.max_results_per_keyword} "
             "nao representa cobertura total da Meta Ads Library."
         ),
     })
-    store.persist_report(run_id, report)
-    store.reconcile_cycle(cycle_id, run_id, {group.group_id for group in report.groups}, full=full)
     unfinished = any(item["status"] in {"PENDING", "ERROR"} for item in rows)
     if full:
         status, reason = "COMPLETED", None
     elif unfinished:
-        status, reason = "PARTIAL", "keywords pendentes, com erro ou plano menor que o oficial"
+        status, reason = "PARTIAL", pause_reason or "keywords pendentes, com erro ou plano menor que o oficial"
     else:
         status, reason = "PARTIAL", "subset/gate nao equivale ao plano oficial de 106 keywords"
-    store.finish_run(run_id, "COMPLETED" if not unfinished else "COMPLETED_WITH_ERRORS")
-    store.update_cycle(cycle_id, status, finished=not unfinished, reason=reason)
+    store.finalize_cycle(cycle_id, run_id, report, full=full, unfinished=unfinished, status=status, reason=reason)
+    diagnostic("cycle_run_finalized", cycle_id=cycle_id, run_id=run_id, status=status,
+               succeeded=cycle.succeeded, failed=cycle.failed, pending=cycle.pending)
     final_cycle = get_cycle(store, cycle_id)
     report.collection["cycle"] = final_cycle.to_dict()
     return final_cycle, report
+
+
+def saved_cycle_report(store: RadarStore, cycle: CollectionCycle) -> tuple[RadarReport, int]:
+    """Re-export a finalized snapshot after a console or filesystem failure."""
+    if cycle.status not in {"COMPLETED", "PARTIAL"} or not cycle.run_ids:
+        raise ValueError("cycle has no finalized snapshot; resume it first")
+    run_id = cycle.run_ids[-1]
+    groups = [EvidenceGroup(**row) for row in store.run_group_snapshots(run_id)]
+    rows = [row for row in store.cycle_keywords(cycle.cycle_id) if row["status"] == "OK"]
+    ads = [ad for row in rows for ad in checkpoint_ads(row)]
+    return RadarReport.create(RadarConfig(**cycle.config), {
+        "cycle": cycle.to_dict(), "coverage": cycle.coverage_kind, "observations": len(ads),
+        "unique_ad_ids": len({str(ad.id) for ad in ads}), "groups": len(groups),
+    }, groups), run_id
