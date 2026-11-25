@@ -241,6 +241,9 @@ Git associados. O arquivo de bloqueio local não faz parte do backup.
 
 ## Fase 5 — mineração e monitoramento por um comando
 
+Para a rotina sob demanda **Rodar Radar**, consulte a
+[operação local com verificação comercial](../docs/radar-operacao-local.md).
+
 Instale o projeto em um ambiente Python isolado. No Windows, com Python 3.12
 disponível pelo launcher:
 

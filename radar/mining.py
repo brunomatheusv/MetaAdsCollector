@@ -26,6 +26,8 @@ from .storage import RadarStore
 REGISTRY = "fernando-oliveira-pro-106.json"
 REPORTS = ("shortlist.md", "shortlist-tecnica.md", "relatorio.md", "relatorio.json")
 KNOWN_FAILURES = {"rate_limit", "access_blocked", "transient_transport", "incomplete_search", "search_error"}
+REVIEW_PENDING = "PENDING"
+REVIEW_FINALIZED = "FINALIZED"
 
 
 def _report_files(workspace: Path, cycle_id: str) -> tuple[Path, ...]:
@@ -38,19 +40,21 @@ def _report_files(workspace: Path, cycle_id: str) -> tuple[Path, ...]:
     return paths
 
 
-def _has_final_export(workspace, cycle) -> bool:
+def _saved_export(workspace, cycle) -> dict | None:
     *documents, manifest = _report_files(workspace, cycle.cycle_id)
     if not all(path.is_file() for path in (*documents, manifest)):
-        return False
+        return None
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
-        return False
-    return isinstance(data, dict) and (data.get("cycle_id"), data.get("coverage_kind"), data.get("run_ids")) == (
+        return None
+    if isinstance(data, dict) and (data.get("cycle_id"), data.get("coverage_kind"), data.get("run_ids")) == (
         cycle.cycle_id,
         cycle.coverage_kind,
         cycle.run_ids,
-    )
+    ):
+        return {key: data.get(key) for key in ("commercial_review_state", "commercial_ceiling_brl")}
+    return None
 
 
 def _cycle_events(store, cycle):
@@ -127,22 +131,27 @@ def _automatic_review(workspace, cycle, ranked, ceiling):
     return result
 
 
-def _export(workspace, store, cycle, report, limit, *, ceiling=None, record=False):
+def _export(
+    workspace, store, cycle, report, limit, *, ceiling=None, saved_ceiling=None, record=False, review_state=None,
+):
     events = _cycle_events(store, cycle)
     pending = store.review_queue()
     ranked = build_shortlist(report, events, limit=len(report.groups), review_status=store.review_statuses())
     automatic = _automatic_review(workspace, cycle, ranked, ceiling)
+    effective_ceiling = ceiling or automatic.get("ceiling_brl") or saved_ceiling or DEFAULT_CEILING_BRL
     assessed = classify(
         workspace,
         store,
         cycle,
         ranked,
         automatic=automatic.get("groups"),
-        ceiling=ceiling if ceiling is not None else automatic.get("ceiling_brl"),
+        ceiling=effective_ceiling,
     )
     shortlist = _daily_shortlist(workspace, cycle, assessed, min(limit, 5), record=record)
     technical = ranked[:limit]
     short_md = render_commercial(shortlist, cycle, shortlist=True)
+    if review_state == REVIEW_PENDING:
+        short_md = "> Prévia. A verificação comercial deste ciclo está pendente.\n\n" + short_md
     technical_md = render_shortlist(cycle, technical, limit=limit)
     keyword_rows = []
     for row in store.cycle_keywords(cycle.cycle_id):
@@ -164,9 +173,7 @@ def _export(workspace, store, cycle, report, limit, *, ceiling=None, record=Fals
             "shortlist": shortlist,
             "technical_shortlist": technical,
             "commercial_assessments": assessed,
-            "commercial_ceiling_brl": ceiling
-            if ceiling is not None
-            else (automatic.get("ceiling_brl") or DEFAULT_CEILING_BRL),
+            "commercial_ceiling_brl": effective_ceiling,
             "commercial_inspection": {key: value for key, value in automatic.items() if key != "groups"},
             "offers": offer_counts(report),
             "keywords": keyword_rows,
@@ -174,6 +181,8 @@ def _export(workspace, store, cycle, report, limit, *, ceiling=None, record=Fals
             "pending_review": [item.to_dict() for item in pending],
         }
     )
+    if review_state:
+        payload["commercial_review_state"] = review_state
     event_counts = Counter(event.event_type for event in events)
     event_labels = ", ".join(f"{key}={value}" for key, value in sorted(event_counts.items())) or "nenhum"
     monitoring = [
@@ -219,25 +228,38 @@ def mine_once(
     report_cycle: str | None = None,
     lp_enrichment: bool = False,
     commercial_ceiling: float | None = None,
+    assisted_review: bool = False,
     search=None,
     sleep=time.sleep,
 ) -> tuple:
     with collection_lock(store.path):
+        previous = report_cycle or store.latest_managed_cycle()
+        cycle = get_cycle(store, previous) if previous else None
+        saved = _saved_export(workspace, cycle) if cycle else None
+        review_state = saved["commercial_review_state"] if saved else None
+        saved_ceiling = saved["commercial_ceiling_brl"] if saved else None
         if report_cycle:
-            cycle = get_cycle(store, report_cycle)
+            if assisted_review:
+                if cycle.coverage_kind != "FULL_COVERAGE" or review_state not in (REVIEW_PENDING, REVIEW_FINALIZED):
+                    raise ValueError("Para finalizar a revisão, prepare primeiro um ciclo FULL com --assisted-review.")
+                review_state = REVIEW_FINALIZED
             report, _ = saved_cycle_report(store, cycle)
         else:
-            entries = load_fernando_registry(Path(__file__).parent / "data" / REGISTRY)
-            config = RadarConfig()
-            previous = store.latest_managed_cycle()
-            cycle = get_cycle(store, previous) if previous else None
-            if cycle and cycle.status == "COMPLETED" and not _has_final_export(workspace, cycle):
+            if review_state == REVIEW_PENDING:
+                commercial_ceiling = saved_ceiling
+            if cycle and cycle.status == "COMPLETED" and (not saved or review_state == REVIEW_PENDING):
                 report, _ = saved_cycle_report(store, cycle)
             else:
+                entries = load_fernando_registry(Path(__file__).parent / "data" / REGISTRY)
+                config = RadarConfig()
                 if cycle is None or cycle.status == "COMPLETED":
                     cycle = start_cycle(entries, store, config, managed=True)
+                    review_state = None
+                    saved_ceiling = None
                 diagnostic("mining_cycle_selected", cycle_id=cycle.cycle_id, previous_status=cycle.status)
                 cycle, report = _run_cycle(store, cycle.cycle_id, entries, config, search, None, sleep)
+            if assisted_review:
+                review_state = REVIEW_PENDING
             if lp_enrichment:
                 report.collection["lp_enrichment"] = investigate_groups(
                     report.to_dict()["groups"],
@@ -252,7 +274,9 @@ def mine_once(
             report,
             limit,
             ceiling=commercial_ceiling,
-            record=report_cycle is None,
+            saved_ceiling=saved_ceiling,
+            record=review_state != REVIEW_PENDING and (report_cycle is None or assisted_review),
+            review_state=review_state,
         )
         return cycle, path, shortlisted
 
@@ -270,6 +294,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--every-hours", type=int, metavar="HORAS", help="intervalo de monitoramento em primeiro plano")
     parser.add_argument("--report-cycle", metavar="ID", help="reexporta um ciclo salvo sem rede")
     parser.add_argument("--lp-enrichment", action="store_true", help="investigação opcional de landing pages")
+    parser.add_argument(
+        "--assisted-review", action="store_true",
+        help="prepara a verificação comercial; com --report-cycle, fecha a shortlist sem nova coleta",
+    )
     parser.add_argument("--low-ticket-max-brl", type=float, help="teto em reais para verificar ofertas novas")
     args = parser.parse_args(argv)
     ceiling = args.low_ticket_max_brl
@@ -281,6 +309,8 @@ def main(argv: list[str]) -> int:
         parser.error("--every-hours deve estar entre 1 e 168")
     if args.report_cycle and (args.every_hours is not None or args.lp_enrichment or ceiling is not None):
         parser.error("--report-cycle é uma exportação local sem rede")
+    if args.assisted_review and args.every_hours is not None:
+        parser.error("--assisted-review exige execução sob demanda")
     workspace = args.workspace.resolve()
     database = workspace / "radar.sqlite3"
     if args.report_cycle and not database.is_file():
@@ -303,9 +333,11 @@ def main(argv: list[str]) -> int:
                 report_cycle=args.report_cycle,
                 lp_enrichment=args.lp_enrichment,
                 commercial_ceiling=ceiling,
+                assisted_review=args.assisted_review,
             )
             _console(
                 f"{cycle.coverage_kind} {cycle.succeeded}/{cycle.total_keywords_expected} · "
+                f"{'prévia: ' if args.assisted_review and not args.report_cycle else ''}"
                 f"{count} qualificadas no Brasil · {shortlist}"
             )
             if args.every_hours is None:

@@ -135,3 +135,47 @@ def test_offline_reexport_uses_latest_review_and_keeps_partial_label(tmp_path):
     assert count == 0
     assert "Lista provisória" in render_shortlist(cycle, [], limit=5)
     assert store.review_statuses()[group] == "DESCARTADO"
+
+
+def test_assisted_review_reuses_full_cycle_and_records_only_after_verification(tmp_path):
+    store = RadarStore(tmp_path / "radar.sqlite3")
+
+    def search(entry, _):
+        return _ads(100, 5) if entry.text == "ebook" else []
+
+    history = tmp_path / "historico-shortlist.json"
+    reviews = tmp_path / "qualificacao-comercial.json"
+    cycle, shortlist, count = mining.mine_once(
+        tmp_path, store, search=search, sleep=lambda _: None, assisted_review=True,
+    )
+    assert cycle.coverage_kind == "FULL_COVERAGE"
+    initial = _payload(shortlist)
+    assert initial["commercial_review_state"] == "PENDING"
+    assert count == 0
+    assert not history.exists()
+
+    group = initial["technical_shortlist"][0]
+    lp = group["destinations"][0]
+    checkout = "https://checkout.example/curso"
+    reviews.write_text(json.dumps([{
+        "cycle_id": cycle.cycle_id, "group_id": group["group_id"], "page_id": group["page_id"], "lp": lp,
+        "category": "INFOPRODUTO_LOW_TICKET_BR", "verified_at": cycle.finished_at, "sources": [lp, checkout],
+        "name": "Curso", "niche": "Costura", "format": "Curso online", "promise": "Montar peças",
+        "price_verified": True, "currency": "BRL", "price": 27.90, "market": "BR", "checkout": checkout,
+    }]), encoding="utf-8")
+
+    def no_search(*_):
+        pytest.fail("A revisão pendente deve usar o mesmo ciclo sem nova coleta.")
+
+    resumed, shortlist, count = mining.mine_once(tmp_path, store, search=no_search, assisted_review=True)
+    assert resumed.cycle_id == cycle.cycle_id
+    assert count == 1 and not history.exists()
+
+    for _ in range(2):
+        finalized, shortlist, count = mining.mine_once(
+            tmp_path, store, report_cycle=cycle.cycle_id, assisted_review=True, search=no_search,
+        )
+        assert finalized.run_ids == cycle.run_ids and count == 1
+        assert _payload(shortlist)["commercial_review_state"] == "FINALIZED"
+        assert json.loads(history.read_text(encoding="utf-8"))["daily"] == {cycle.cycle_id: [group["group_id"]]}
+    assert store.review_statuses()[group["group_id"]] == "NOVO"
