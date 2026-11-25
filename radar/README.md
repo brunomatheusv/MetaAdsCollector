@@ -169,3 +169,40 @@ ruido, destinos de todos os cards e contexto de cobertura quando disponivel.
 CANDIDATO_RADAR indica que o grupo passou filtros tecnicos. A verificacao
 da oferta, do destino real de redirecionamentos e a decisao comercial
 continuam manuais.
+
+## Fase 4C — investigação seletiva de landing pages
+
+A investigação é manual e opt-in. Use `--lp-enrichment` na coleta em lote ou
+em `--cycle-action run/resume` para acrescentar review cards ao relatório.
+O resultado da 4B permanece no histórico. Os cards da 4C apresentam identidade,
+agrupamento e status propostos, sem aplicar decisões ao histórico ou à fila humana.
+
+A seleção considera INVESTIGAR, janela, página, destino consultável, conflitos
+e IDs únicos. O padrão é consultar grupos com 3 IDs ou grupos do mesmo page_id
+com potencial conjunto de atingir o mínimo de 5 IDs. O potencial orienta a
+seleção. Para propor uma união, cada grupo precisa de evidência STRONG com
+o mesmo fingerprint na mesma página. Texto, títulos e raízes são sinais
+complementares. Os critérios de atividade, idade e contagem da 4B continuam
+valendo para candidaturas propostas.
+
+O cliente consulta HTTP(S) diretamente, em série, com DNS validado e fixado
+na conexão, TLS verificado, orçamento de tempo e de bytes e verificação de
+cada redirect. Uma resposta 401, 403 ou 429 interrompe novas consultas ao host
+durante a execução. A investigação usa o HTML recebido, sem executar scripts.
+O cache SQLite guarda metadados e evidências por URL e versão. O histórico mantém evidências anteriores após a expiração. O TTL padrão é
+24 horas. Erros de uma consulta permanecem UNRESOLVED.
+
+Use uma cópia do banco para o replay. O comando lê o snapshot V2 do ciclo e
+grava somente o cache e o histórico HTTP da 4C no SQLite. As consultas novas são destinadas às
+LPs elegíveis. O replay também pode reutilizar o cache válido.
+
+```bash
+meta-ads-radar --cycle-action replay --cycle-id CYCLE_ID \
+  --database radar-replay.sqlite3 --lp-enrichment \
+  --json-output replay.json --markdown-output replay.md
+```
+
+As opções `--lp-min-ids`, `--lp-ttl-hours`, `--lp-timeout`,
+`--lp-max-redirects`, `--lp-max-bytes` e `--lp-max-urls` configuram o gate,
+o cache e os limites de inspeção. A cobertura FULL/PARTIAL continua descrevendo
+o processamento dos termos da Meta.

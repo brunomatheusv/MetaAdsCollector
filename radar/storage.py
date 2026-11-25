@@ -35,6 +35,16 @@ class RadarStore:
     def _initialize(self) -> None:
         with self.connect() as db:
             db.executescript("""
+                CREATE TABLE IF NOT EXISTS lp_fetch_cache (
+                    requested_url TEXT NOT NULL, identity_version INTEGER NOT NULL,
+                    fetched_epoch REAL NOT NULL, result_json TEXT NOT NULL,
+                    PRIMARY KEY(requested_url, identity_version)
+                );
+                CREATE TABLE IF NOT EXISTS lp_fetch_history (
+                    requested_url TEXT NOT NULL, identity_version INTEGER NOT NULL,
+                    fetched_epoch REAL NOT NULL, result_json TEXT NOT NULL,
+                    PRIMARY KEY(requested_url, identity_version, fetched_epoch)
+                );
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
                     status TEXT NOT NULL, config_json TEXT NOT NULL
@@ -315,6 +325,42 @@ class RadarStore:
                           item.reason, json.dumps(item.event_types),
                           json.dumps(item.group, ensure_ascii=False, sort_keys=True)))
         return events
+
+    def read_lp_cache(self, url: str, earliest: float, version: int) -> dict | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT result_json FROM lp_fetch_cache
+                   WHERE requested_url=? AND identity_version=? AND fetched_epoch>?""",
+                (url, version, earliest),
+            ).fetchone()
+        return json.loads(row["result_json"]) if row else None
+
+    def write_lp_cache(self, url: str, result: dict, version: int, *, record_history: bool = True) -> None:
+        fetched_epoch = datetime.fromisoformat(result["fetched_at"]).timestamp()
+        values = (url, version, fetched_epoch, json.dumps(result, ensure_ascii=False))
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO lp_fetch_cache(requested_url, identity_version, fetched_epoch, result_json)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(requested_url, identity_version) DO UPDATE SET
+                     fetched_epoch=excluded.fetched_epoch, result_json=excluded.result_json
+                   WHERE excluded.fetched_epoch >= lp_fetch_cache.fetched_epoch""",
+                values,
+            )
+
+            if record_history:
+                db.execute(
+                    """INSERT OR IGNORE INTO lp_fetch_history
+                       (requested_url, identity_version, fetched_epoch, result_json) VALUES (?, ?, ?, ?)""",
+                    values,
+                )
+
+    def run_group_snapshots(self, run_id: int) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT evidence_json FROM group_history WHERE run_id=? ORDER BY group_id", (run_id,)
+            ).fetchall()
+        return [json.loads(row["evidence_json"]) for row in rows]
 
     def latest_group_evidence(self, group_id: str) -> dict | None:
         with self.connect() as db:

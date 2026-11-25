@@ -62,6 +62,8 @@ def render_markdown(report: RadarReport) -> str:
             f"- Motivos: {'; '.join(group.reasons)}",
             "",
         ]
+    if enrichment := report.collection.get("lp_enrichment"):
+        lines.extend(["", render_lp_markdown(enrichment)])
     return "\n".join(lines)
 
 
@@ -158,4 +160,43 @@ def render_cycle_markdown(cycle: CollectionCycle, report: RadarReport | None = N
         lines.append(f"- Fila pendente: {len(queue)}")
     if report is not None:
         lines += ["", render_markdown(report)]
+    if report and (enrichment := report.collection.get("lp_enrichment")):
+        lines.extend(["", render_lp_markdown(enrichment)])
+    return "\n".join(lines)
+
+
+def render_lp_markdown(investigation: dict) -> str:
+    metrics = investigation["metrics"]
+    lines = [
+        "## Investigação seletiva de LP", "",
+        f"- Grupos elegíveis / ignorados: {metrics['eligible']} / {metrics['skipped']}",
+        f"- URLs inspecionadas / cache persistente / reuso no mesmo ciclo: "
+        f"{metrics['unique_inspections']} / {metrics['cache_hits']} / {metrics['shared_urls_saved']}",
+        f"- Evidência por grupo: {metrics['levels']}",
+        f"- Promoções / consolidações propostas: {metrics['promotion_proposals']} / {metrics['merge_proposals']}",
+        f"- Erros por URL: {metrics['errors_by_url']}",
+        "",
+    ]
+    for card in investigation["cards"]:
+        if card["status_before"] != "INVESTIGAR":
+            continue
+        lines.extend([
+            f"### Grupo {card['group_id']}",
+            "",
+            f"- Elegível: {card['eligible']}. Motivos: "
+            f"{', '.join(card['reasons'] or card['skipped_reasons'])}",
+            f"- Evidência: {card['enrichment_status']}. Fonte: {card['source']}",
+            f"- Status: {card['status_before']} → {card['status_after']}",
+            f"- Confiança: {card['confidence_before']} → {card['confidence_after']}",
+            f"- Grupo proposto: {', '.join(card['grouping_after'])}",
+        ])
+        if lp := card["lp"]:
+            for key in ("requested_url", "final_url", "canonical_url"):
+                if value := lp.get(key):
+                    lines.append(f"- {key}: `{value.replace(chr(96), '%60')}`")
+            lines.append(f"- Redirecionamentos: {max(0, len(lp['redirect_chain']) - 1)}")
+            lines.append(f"- Evidência e conflitos: {', '.join(lp['reasons'] + lp['conflicts'])}")
+        if card["why_changed"]:
+            lines.append(f"- Motivo da alteração proposta: {', '.join(card['why_changed'])}")
+        lines.append("")
     return "\n".join(lines)
