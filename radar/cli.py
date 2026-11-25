@@ -28,7 +28,9 @@ from .storage import RadarStore
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Radar Low-Ticket Fase 4A recorrente")
+    parser = argparse.ArgumentParser(
+        description="Radar Low-Ticket. Use meta-ads-radar mine --help para a mineração automatizada.",
+    )
     parser.add_argument("--cycle-action", choices=["start", "run", "resume", "status", "report", "queue", "replay"],
                         help="contrato manual de ciclo; ausente preserva a CLI da Fase 3")
     parser.add_argument("--cycle-id", help="identificador retornado por --cycle-action start")
@@ -63,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["mine"]:
+        from .mining import main as mine_main
+
+        return mine_main(sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
     outputs = (args.json_output, args.markdown_output, args.events_output,

@@ -238,3 +238,55 @@ individual. Se a exportação falhar depois da coleta, use `report` para repetir
 a geração. Para exportar evidência de LP, use separadamente o replay opt-in.
 Transfira o banco por backup SQLite verificado, com os relatórios e o SHA
 Git associados. O arquivo de bloqueio local não faz parte do backup.
+
+## Fase 5 — mineração e monitoramento por um comando
+
+Instale o projeto em um ambiente Python isolado. No Windows, com Python 3.12
+disponível pelo launcher:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install .
+.venv\Scripts\meta-ads-radar.exe mine
+```
+
+Em um ambiente já ativado, basta executar `meta-ads-radar mine`. O comando usa
+o registro oficial embarcado de 106 keywords, Brasil, anúncios ativos, até 20
+resultados por keyword e janela de 60 dias. O SQLite e o log ficam em
+`radar-work/`. Use `--workspace CAMINHO` para escolher outra pasta. Preserve
+a mesma pasta entre execuções para manter o histórico incremental.
+
+Se houver interrupção, execute o mesmo comando. O Radar retoma o ciclo
+automatizado pendente e pula checkpoints confirmados. Caso a coleta tenha
+finalizado antes de uma falha na exportação, ele recupera o relatório antes
+de abrir outro ciclo. O código de saída 2 identifica cobertura parcial. O
+enriquecimento de LP segue opcional por `--lp-enrichment`.
+
+Para monitoramento recorrente em primeiro plano, execute
+`meta-ads-radar mine --every-hours 24`. O intervalo é contado após cada
+execução. A janela precisa permanecer aberta. Ctrl+C preserva os checkpoints.
+Novos ciclos comparam o histórico do mesmo banco, mantendo fila,
+acknowledgements e decisões humanas.
+
+Cada ciclo publica `relatorios/<ciclo>/shortlist.md`, `relatorio.md` e
+`relatorio.json`. A shortlist padrão tem até cinco ofertas, ajustável entre
+1 e 10 por `--shortlist`. Ela mostra somente candidatos técnicos de confiança
+alta com evidência do ciclo atual. A ordem usa contagem de IDs observados,
+data de início mais recente e novos IDs frente ao histórico. A classificação
+não infere preço, vendas ou demanda. Cobertura parcial aparece como
+provisória, e o Radar preserva o tratamento conservador de ausências.
+O JSON inclui todas as keywords, grupos, eventos e a fila pendente.
+
+Para recuperar uma exportação local sem repetir consultas:
+
+```text
+meta-ads-radar mine --workspace CAMINHO --report-cycle ID_DO_CICLO
+```
+
+Para transferir após a validação do Windows, feche a mineração e use um
+backup SQLite verificado, o código ou wheel identificado pelo SHA e o
+registro oficial. No macOS, crie um ambiente com `python3 -m venv .venv`,
+instale o projeto e restaure `radar.sqlite3` na pasta escolhida. Confirme
+primeiro com `mine --report-cycle`. A transferência inclui apenas
+configurações operacionais públicas. Mantenha credenciais e configurações
+de autenticação em cada computador.

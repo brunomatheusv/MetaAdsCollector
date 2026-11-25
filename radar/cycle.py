@@ -32,7 +32,8 @@ def _registry_identity(entries: list[KeywordEntry]) -> tuple[str, str]:
     return _digest(registry), _digest(plan)
 
 
-def start_cycle(entries: list[KeywordEntry], store: RadarStore, config: RadarConfig | None = None) -> CollectionCycle:
+def start_cycle(entries: list[KeywordEntry], store: RadarStore, config: RadarConfig | None = None, *,
+                managed: bool = False) -> CollectionCycle:
     if not entries or len({entry.id for entry in entries}) != len(entries):
         raise ValueError("cycle plan requires nonempty, distinct keyword IDs")
     config = config or RadarConfig()
@@ -61,7 +62,7 @@ def start_cycle(entries: list[KeywordEntry], store: RadarStore, config: RadarCon
         run_ids=[],
         duration_seconds=None,
     )
-    store.create_cycle(cycle, [(entry.id, entry.text, entry.source) for entry in entries])
+    store.create_cycle(cycle, [(entry.id, entry.text, entry.source) for entry in entries], managed=managed)
     return cycle
 
 

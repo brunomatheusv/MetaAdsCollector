@@ -99,6 +99,9 @@ class RadarStore:
                     total_keywords_expected INTEGER NOT NULL, official_plan INTEGER NOT NULL,
                     reason TEXT
                 );
+                CREATE TABLE IF NOT EXISTS managed_cycles (
+                    cycle_id TEXT PRIMARY KEY REFERENCES collection_cycles(cycle_id)
+                );
                 CREATE TABLE IF NOT EXISTS cycle_keywords (
                     cycle_id TEXT NOT NULL, ordinal INTEGER NOT NULL, keyword_id TEXT NOT NULL,
                     keyword_text TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
@@ -120,7 +123,8 @@ class RadarStore:
                 );
             """)
 
-    def create_cycle(self, cycle: CollectionCycle, keywords: list[tuple[str, str, str]]) -> None:
+    def create_cycle(self, cycle: CollectionCycle, keywords: list[tuple[str, str, str]], *,
+                     managed: bool = False) -> None:
         with self.connect() as db:
             db.execute("""INSERT INTO collection_cycles
                 (cycle_id,started_at,finished_at,status,registry_source,registry_version,registry_hash,
@@ -135,6 +139,17 @@ class RadarStore:
                 (cycle_id,ordinal,keyword_id,keyword_text,source) VALUES(?,?,?,?,?)""",
                 [(cycle.cycle_id, i, keyword_id, text, source)
                  for i, (keyword_id, text, source) in enumerate(keywords)])
+
+            if managed:
+                db.execute("INSERT INTO managed_cycles VALUES(?)", (cycle.cycle_id,))
+
+    def latest_managed_cycle(self) -> str | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT c.cycle_id FROM managed_cycles m JOIN collection_cycles c USING(cycle_id)
+                   ORDER BY c.started_at DESC, c.rowid DESC LIMIT 1"""
+            ).fetchone()
+        return row[0] if row else None
 
     def cycle_row(self, cycle_id: str) -> sqlite3.Row:
         with self.connect() as db:
@@ -644,6 +659,10 @@ class RadarStore:
             if db.execute("UPDATE review_queue SET acknowledged_at=? WHERE run_id=? AND group_id=?",
                           (datetime.now(timezone.utc).isoformat(), run_id, group_id)).rowcount != 1:
                 raise KeyError((run_id, group_id))
+
+    def review_statuses(self) -> dict[str, str]:
+        with self.connect() as db:
+            return dict(db.execute("SELECT group_id,review_status FROM groups"))
 
     def set_review_status(self, group_id: str, status: str) -> None:
         if status not in REVIEW_STATUSES:

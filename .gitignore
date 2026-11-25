@@ -57,6 +57,7 @@ Desktop.ini
 *.csv
 *.jsonl
 output/
+/radar-work/
 ad_media/
 work/
 
