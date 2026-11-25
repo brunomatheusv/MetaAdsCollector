@@ -159,6 +159,7 @@ def _run_cycle(store, cycle_id, entries, config, search, max_keywords, sleep):
     if row["status"] == "COMPLETED":
         raise ValueError("cycle is already completed; start the next cycle instead of re-executing it")
 
+    store.ensure_media_identity()
     by_id = {entry.id: entry for entry in entries}
     checkpoint = store.cycle_keywords(cycle_id)
     if [(r["keyword_id"], r["keyword_text"], r["source"]) for r in checkpoint] != [

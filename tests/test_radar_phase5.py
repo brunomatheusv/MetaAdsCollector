@@ -58,12 +58,12 @@ def test_106_keyword_automation_resumes_and_tracks_incremental_changes(tmp_path)
     cycle, path, count = mining.mine_once(tmp_path, store, search=resumed, sleep=lambda _: None)
     assert cycle.cycle_id == interrupted_cycle
     assert cycle.coverage_kind == "FULL_COVERAGE"
-    assert count == 1
+    assert count == 0
     assert calls == [entries[0].id, entries[1].id, *(entry.id for entry in entries[1:])]
     report = _payload(path)
     assert len(report["keywords"]) == 106
-    assert len(report["shortlist"][0]["ad_links"]) == 5
-    assert set(report["shortlist"][0]["event_types"]) >= {"NEW_GROUP"}
+    assert len(report["technical_shortlist"][0]["ad_links"]) == 5
+    assert set(report["technical_shortlist"][0]["event_types"]) >= {"NEW_GROUP"}
 
     def next_search(entry, _):
         return _ads(100, 6) if entry == entries[0] else []
@@ -71,7 +71,7 @@ def test_106_keyword_automation_resumes_and_tracks_incremental_changes(tmp_path)
     second, path, _ = mining.mine_once(tmp_path, store, search=next_search, sleep=lambda _: None)
     assert second.cycle_id != cycle.cycle_id
     report = _payload(path)
-    assert report["shortlist"][0]["new_ads_vs_history"] == 1
+    assert report["technical_shortlist"][0]["new_ads_vs_history"] == 1
     assert any(event["event_type"] == "NEW_ADS" for event in report["incremental_events"])
     assert "lp_enrichment" not in report["collection"]
 
@@ -127,9 +127,9 @@ def test_offline_reexport_uses_latest_review_and_keeps_partial_label(tmp_path):
         return _ads(100, 5)
 
     cycle, path, count = mining.mine_once(tmp_path, store, search=partial, sleep=lambda _: None)
-    assert count == 1
-    assert "Lista provisória" in path.read_text(encoding="utf-8")
-    group = _payload(path)["shortlist"][0]["group_id"]
+    assert count == 0
+    assert "Lista provisória" in path.with_name("shortlist-tecnica.md").read_text(encoding="utf-8")
+    group = _payload(path)["technical_shortlist"][0]["group_id"]
     store.set_review_status(group, "DESCARTADO")
     _, path, count = mining.mine_once(tmp_path, store, report_cycle=cycle.cycle_id)
     assert count == 0

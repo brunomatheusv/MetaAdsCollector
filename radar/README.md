@@ -268,11 +268,12 @@ execução. A janela precisa permanecer aberta. Ctrl+C preserva os checkpoints.
 Novos ciclos comparam o histórico do mesmo banco, mantendo fila,
 acknowledgements e decisões humanas.
 
-Cada ciclo publica `relatorios/<ciclo>/shortlist.md`, `relatorio.md` e
-`relatorio.json`. A shortlist padrão tem até cinco ofertas, ajustável entre
-1 e 10 por `--shortlist`. Ela mostra somente candidatos técnicos de confiança
-alta com evidência do ciclo atual. A ordem usa contagem de IDs observados,
-data de início mais recente e novos IDs frente ao histórico. A classificação
+Cada ciclo publica `relatorios/<ciclo>/shortlist.md`, `shortlist-tecnica.md`,
+`relatorio.md` e `relatorio.json`. As shortlists têm até cinco itens por
+padrão, ajustáveis entre 1 e 10 por `--shortlist`. A lista técnica mostra
+candidatos de confiança alta com evidência do ciclo atual. A ordem usa
+contagem de IDs observados, data de início mais recente e novos IDs frente
+ao histórico. A classificação
 não infere preço, vendas ou demanda. Cobertura parcial aparece como
 provisória, e o Radar preserva o tratamento conservador de ausências.
 O JSON inclui todas as keywords, grupos, eventos e a fila pendente.
@@ -290,3 +291,33 @@ instale o projeto e restaure `radar.sqlite3` na pasta escolhida. Confirme
 primeiro com `mine --report-cycle`. A transferência inclui apenas
 configurações operacionais públicas. Mantenha credenciais e configurações
 de autenticação em cada computador.
+
+## Retificação de identidade e qualificação comercial
+
+O fingerprint de criativo ignora apenas uma lista explícita de parâmetros
+voláteis nas URLs de mídia de `.fbcdn.net`. Host, caminho e os demais
+parâmetros continuam fazendo parte da evidência. O histórico FULL oferece
+aliases adicionais somente quando IDs, página, destinos e identidade
+recalculada têm correspondência inequívoca. O histórico de eventos já
+gravados continua consultável. `CREATIVE_REOBSERVED` registra os mesmos IDs,
+página e destino quando faltam provas para conciliar a identidade da oferta.
+A passagem do tempo, por si só, não gera alteração de evidência. A mudança
+do critério de idade continua registrada.
+
+A mineração exporta a shortlist comercial em `shortlist.md`, mantém os
+candidatos técnicos em `shortlist-tecnica.md` e inclui todos os pareceres
+comerciais no relatório. A shortlist comercial exige infoproduto low-ticket
+brasileiro com preço em reais e checkout verificado. O arquivo local
+`radar-work/qualificacao-comercial.json` aceita uma lista de pareceres
+verificados com `cycle_id`, `group_id`, `page_id`, `lp`, `category`,
+`verified_at` e `sources`. O parecer de um ciclo não vale automaticamente
+para o próximo. Sem evidência vinculada, a oferta fica indeterminada.
+
+As categorias são `INFOPRODUTO_LOW_TICKET_BR`, `SOFTWARE_SAAS`,
+`PRODUTO_FISICO`, `SERVICO`, `REFERENCIA_INTERNACIONAL` e `INDETERMINADO`.
+Pareceres brasileiros qualificados também incluem `market: BR`, `currency: BRL`,
+`price`, `price_verified: true`, `name`, `niche`, `format`, `promise`
+e `checkout`, com a página de checkout na lista de fontes. O parecer
+comercial não altera o agrupamento, as regras de candidatura ou a revisão
+humana no SQLite. Use `mine --report-cycle ID` para aplicar o parecer à
+exportação de um ciclo salvo sem fazer nova coleta.

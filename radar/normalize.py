@@ -6,13 +6,17 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 from meta_ads_collector import Ad
 
 from .models import NormalizedAd
 
 _TRACKING = {"fbclid", "gclid", "dclid", "msclkid", "gbraid", "wbraid", "ttclid"}
+# Seen changing between observations of the same ad and CDN object.
+# Keep rendition/transform parameters such as efg, stp and _nc_vs intact.
+_META_MEDIA_VOLATILE = {"oh", "oe", "_nc_ohc", "_nc_oc", "_nc_gid", "_nc_ss"}
+_MEDIA_FIELDS = {"image_url", "video_url", "thumbnail_url"}
 _GENERIC_HOSTS = {
     "facebook.com", "instagram.com", "whatsapp.com", "wa.me", "messenger.com",
     "bit.ly", "tinyurl.com", "t.co", "linktr.ee", "beacons.ai", "bio.link", "cutt.ly", "shorturl.at",
@@ -67,13 +71,33 @@ def canonical_url(value: str | None) -> tuple[str | None, str | None, str | None
         return value, None, None
 
 
+def _media_identity(value: str) -> str:
+    try:
+        parts = urlsplit(value)
+        if (
+            parts.scheme not in {"http", "https"} or parts.username is not None
+            or not (parts.hostname or "").endswith(".fbcdn.net")
+        ):
+            return value
+        query = "&".join(
+            field for field in parts.query.split("&")
+            if unquote_plus(field.partition("=")[0]) not in _META_MEDIA_VOLATILE
+        )
+        if query != parts.query:
+            return urlunsplit(parts._replace(query=query))
+    except ValueError:
+        pass
+    return value
+
+
 def _creative_values(ad: Ad) -> list[str]:
     values: list[str] = []
     for creative in ad.creatives:
         for name in ("body", "title", "description", "caption", "image_url", "video_url", "thumbnail_url"):
             value = getattr(creative, name, None)
             if value:
-                values.append(str(value).strip())
+                text = str(value).strip()
+                values.append(_media_identity(text) if name in _MEDIA_FIELDS else text)
     return values
 
 

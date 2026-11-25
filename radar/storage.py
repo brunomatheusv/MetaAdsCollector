@@ -78,6 +78,11 @@ class RadarStore:
                     legacy_group_id TEXT PRIMARY KEY REFERENCES groups(group_id),
                     group_id TEXT NOT NULL UNIQUE REFERENCES groups(group_id)
                 );
+                CREATE TABLE IF NOT EXISTS radar_migrations (name TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS media_group_aliases (
+                    legacy_id TEXT PRIMARY KEY REFERENCES groups(group_id), canonical_id TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS media_group_aliases_target ON media_group_aliases(canonical_id);
                 CREATE TABLE IF NOT EXISTS incremental_events (
                     run_id INTEGER NOT NULL, group_id TEXT NOT NULL, event_type TEXT NOT NULL,
                     occurred_at TEXT NOT NULL, before_json TEXT, after_json TEXT NOT NULL,
@@ -122,6 +127,13 @@ class RadarStore:
                     FOREIGN KEY(group_id) REFERENCES groups(group_id)
                 );
             """)
+
+    def ensure_media_identity(self) -> int:
+        from .continuity import reconcile_saved_media_keys
+
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return reconcile_saved_media_keys(db)
 
     def create_cycle(self, cycle: CollectionCycle, keywords: list[tuple[str, str, str]], *,
                      managed: bool = False) -> None:
@@ -385,6 +397,18 @@ class RadarStore:
         group.first_observed_at = row["first_seen"]
         group.last_observed_at = row["last_seen"]
 
+    @staticmethod
+    def _prior_creative_observations(db: sqlite3.Connection, run_id: int) -> dict[tuple, dict]:
+        rows = db.execute("""
+            SELECT evidence_json FROM group_history
+            WHERE run_id=(SELECT MAX(run_id) FROM group_history WHERE run_id<?)
+              AND json_extract(evidence_json, '$.evidence_level')='PROBABLE_SAME_OFFER'
+        """, (run_id,))
+        return {
+            (g["page_id"], tuple(g["ad_ids"]), tuple(g.get("destination_fingerprints", []))): g
+            for row in rows if (g := json.loads(row[0]))["page_id"]
+        }
+
     def persist_report(self, run_id: int, report: RadarReport, *,
                        connection: sqlite3.Connection | None = None) -> list[IncrementalEvent]:
         now = datetime.now(timezone.utc).isoformat()
@@ -393,14 +417,31 @@ class RadarStore:
             if connection is None:
                 db.execute("BEGIN IMMEDIATE")
             migrations = self._grouping_migrations(db, report)
+            prior_observations = self._prior_creative_observations(db, run_id)
             for group in report.groups:
                 legacy_id = migrations.get(group.group_id)
+                media_aliases = db.execute("""
+                    SELECT g.group_id,g.review_status,g.first_seen FROM groups g
+                    JOIN media_group_aliases m ON m.legacy_id=g.group_id WHERE m.canonical_id=?
+                """, (group.group_id,)).fetchall()
+                group.legacy_group_ids = sorted(set(group.legacy_group_ids) | {r["group_id"] for r in media_aliases})
+                first_group = not db.execute("SELECT 1 FROM groups WHERE group_id=?", (group.group_id,)).fetchone()
                 previous_row = db.execute("""
                     SELECT gh.evidence_json FROM group_history gh
-                    WHERE gh.group_id IN (?, ?) AND gh.run_id < ? ORDER BY gh.run_id DESC LIMIT 1
-                """, (group.group_id, legacy_id, run_id)).fetchone()
+                    WHERE (gh.group_id IN (?, ?) OR gh.group_id IN (
+                        SELECT legacy_id FROM media_group_aliases WHERE canonical_id=?
+                    )) AND gh.run_id < ? ORDER BY gh.run_id DESC, gh.group_id LIMIT 1
+                """, (group.group_id, legacy_id, group.group_id, run_id)).fetchone()
                 previous = json.loads(previous_row[0]) if previous_row else None
                 self._observe_group(db, group, now, legacy_id)
+                if media_aliases and first_group and legacy_id is None:
+                    decisions = {r["review_status"] for r in media_aliases} - {"NOVO"}
+                    if len(decisions) > 1:
+                        group.noise_flags.append("decisoes_humanas_historicas_conflitantes")
+                    group.review_status = next(iter(decisions)) if len(decisions) == 1 else "NOVO"
+                    group.first_observed_at = min(r["first_seen"] for r in media_aliases)
+                    db.execute("UPDATE groups SET review_status=?,first_seen=? WHERE group_id=?",
+                               (group.review_status, group.first_observed_at, group.group_id))
                 current = dict(group.__dict__)
                 db.execute("""
                     INSERT OR REPLACE INTO group_history
@@ -408,6 +449,17 @@ class RadarStore:
                     VALUES(?,?,?,?,?,?)
                 """, (run_id, group.group_id, now, group.related_ads_count, group.final_status,
                       json.dumps(current, ensure_ascii=False, sort_keys=True)))
+                if (
+                    previous is None and group.evidence_level == "PROBABLE_SAME_OFFER"
+                    and not group.conflicting_evidence
+                ):
+                    lookup = (group.page_id, tuple(group.ad_ids), tuple(group.destination_fingerprints))
+                    if observed := prior_observations.get(lookup):
+                        events.append(IncrementalEvent(
+                            "CREATIVE_REOBSERVED", run_id, group.group_id, now, observed, current,
+                            ["mesmos IDs, pagina e destino reobservados; a oferta nao foi conciliada automaticamente"],
+                        ))
+                        previous = observed
                 events.extend(self._derive_events(run_id, now, group.group_id, previous, current))
             for event in events:
                 db.execute("""
@@ -467,6 +519,19 @@ class RadarStore:
             ).fetchall()
         return [json.loads(row["evidence_json"]) for row in rows]
 
+    def prior_full_group_counts(self, cycle: CollectionCycle) -> dict[str, int]:
+        with self.connect() as db:
+            rows = db.execute("""
+                SELECT group_id,related_ads_count FROM group_history WHERE run_id=(
+                    SELECT MAX(r.run_id) FROM cycle_runs r WHERE r.cycle_id=(
+                        SELECT c.cycle_id FROM collection_cycles c
+                        WHERE c.started_at<? AND c.status='COMPLETED' AND c.official_plan=1
+                          AND c.plan_hash=? ORDER BY c.started_at DESC, c.rowid DESC LIMIT 1
+                    )
+                )
+            """, (cycle.started_at, cycle.plan_hash)).fetchall()
+        return dict(rows)
+
     def latest_group_evidence(self, group_id: str) -> dict | None:
         with self.connect() as db:
             row = db.execute(
@@ -477,7 +542,10 @@ class RadarStore:
 
     def known_group_ids(self) -> set[str]:
         with self.connect() as db:
-            rows = db.execute("SELECT group_id FROM groups").fetchall()
+            rows = db.execute("""
+                SELECT COALESCE(m.canonical_id, g.group_id) FROM groups g
+                LEFT JOIN media_group_aliases m ON m.legacy_id=g.group_id
+            """).fetchall()
         return {str(row[0]) for row in rows}
 
     def reconcile_cycle(
@@ -490,7 +558,9 @@ class RadarStore:
         with (nullcontext(connection) if connection is not None else self.connect()) as db:
             # V1 identities cannot be treated as missing V2 offers.
             known = {str(row[0]) for row in db.execute("""
-                SELECT DISTINCT group_id FROM group_history WHERE json_extract(evidence_json, '$.grouping_version')=2
+                SELECT DISTINCT COALESCE(m.canonical_id, h.group_id) FROM group_history h
+                LEFT JOIN media_group_aliases m ON m.legacy_id=h.group_id
+                WHERE json_extract(h.evidence_json, '$.grouping_version')=2
             """)}
             for group_id in observed_group_ids:
                 db.execute("""INSERT INTO group_freshness
@@ -580,7 +650,7 @@ class RadarStore:
         ):
             result.append(event("LEFT_RADAR", ["grupo deixou de atender aos filtros tecnicos do Radar"]))
         evidence_fields = (
-            "keywords", "ad_ids", "start_dates", "ages_days", "destination_urls",
+            "keywords", "ad_ids", "start_dates", "destination_urls",
             "destination_domains", "grouping_confidence", "criterion_5_plus", "criterion_max_age",
             "confidence_reasons", "conflicting_evidence", "noise_flags", "grouping_migration", "separation_level",
         )
@@ -680,6 +750,7 @@ class RadarStore:
             rows = db.execute(
                 """SELECT related_ads_count FROM group_history WHERE group_id=?
                    OR group_id=(SELECT legacy_group_id FROM grouping_aliases WHERE group_id=?)
-                   ORDER BY run_id""", (group_id, group_id)
+                   OR group_id IN (SELECT legacy_id FROM media_group_aliases WHERE canonical_id=?)
+                   ORDER BY run_id, group_id""", (group_id, group_id, group_id)
             ).fetchall()
         return [int(row[0]) for row in rows]

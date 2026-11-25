@@ -43,6 +43,7 @@ def run_batch(entries: list[KeywordEntry], store: RadarStore, config: RadarConfi
 
 def _run_batch(entries, store, config, run_id, search, sleep):
     started = time.monotonic()
+    store.ensure_media_identity()
     plan = {entry.id: (entry.text, entry.source) for entry in entries}
     if len(plan) != len(entries):
         raise ValueError("batch requires distinct keyword IDs")

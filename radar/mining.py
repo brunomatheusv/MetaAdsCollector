@@ -11,6 +11,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from .commercial import classify, render_commercial
 from .cycle import _run_cycle, get_cycle, saved_cycle_report, start_cycle
 from .lp import LPConfig, investigate_groups
 from .models import RadarConfig
@@ -21,7 +22,7 @@ from .shortlist import build_shortlist, offer_counts, render_shortlist
 from .storage import RadarStore
 
 REGISTRY = "fernando-oliveira-pro-106.json"
-REPORTS = ("shortlist.md", "relatorio.md", "relatorio.json")
+REPORTS = ("shortlist.md", "shortlist-tecnica.md", "relatorio.md", "relatorio.json")
 KNOWN_FAILURES = {"rate_limit", "access_blocked", "transient_transport", "incomplete_search", "search_error"}
 
 
@@ -57,8 +58,12 @@ def _cycle_events(store, cycle):
 def _export(workspace, store, cycle, report, limit):
     events = _cycle_events(store, cycle)
     pending = store.review_queue()
-    shortlist = build_shortlist(report, events, limit=limit, review_status=store.review_statuses())
-    short_md = render_shortlist(cycle, shortlist, limit=limit)
+    ranked = build_shortlist(report, events, limit=len(report.groups), review_status=store.review_statuses())
+    assessed = classify(workspace, store, cycle, ranked)
+    shortlist = [row for row in assessed if row["qualified"]][:limit]
+    technical = ranked[:limit]
+    short_md = render_commercial(shortlist, cycle, shortlist=True)
+    technical_md = render_shortlist(cycle, technical, limit=limit)
     keyword_rows = []
     for row in store.cycle_keywords(cycle.cycle_id):
         error = row["error"]
@@ -76,6 +81,8 @@ def _export(workspace, store, cycle, report, limit):
         {
             "shortlist_limit": limit,
             "shortlist": shortlist,
+            "technical_shortlist": technical,
+            "commercial_assessments": assessed,
             "offers": offer_counts(report),
             "keywords": keyword_rows,
             "incremental_events": [event.to_dict() for event in events],
@@ -93,12 +100,14 @@ def _export(workspace, store, cycle, report, limit):
         "",
     ]
     tech_md = render_cycle_markdown(cycle, report, events, pending)
-    short_path, full_path, json_path = _report_files(workspace, cycle.cycle_id)
+    short_path, technical_path, full_path, json_path = _report_files(workspace, cycle.cycle_id)
     short_path.parent.mkdir(parents=True, exist_ok=True)
     write_reports(
         [
             (short_path, short_md),
-            (full_path, short_md + "\n" + "\n".join(monitoring) + "\n" + tech_md + "\n"),
+            (technical_path, technical_md),
+            (full_path, short_md + "\n" + render_commercial(assessed, cycle) + "\n"
+             + "\n".join(monitoring) + "\n" + tech_md + "\n"),
             (json_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n"),
         ]
     )
@@ -187,7 +196,7 @@ def main(argv: list[str]) -> int:
             )
             _console(
                 f"{cycle.coverage_kind} {cycle.succeeded}/{cycle.total_keywords_expected} · "
-                f"{count} na shortlist · {shortlist}"
+                f"{count} qualificadas no Brasil · {shortlist}"
             )
             if args.every_hours is None:
                 return 0 if args.report_cycle or cycle.coverage_kind == "FULL_COVERAGE" else 2
